@@ -39,6 +39,13 @@
 36. **Homebrew gcc-arm-embedded cask needs sudo** — Use `brew install arm-none-eabi-gcc` formula (no newlib!) or download official ARM toolchain tarball directly to ~/arm-toolchain/ (includes newlib).
 37. **CFG_TUH_VENDOR broken** — TinyUSB vendor host class has `pipe_handle_t` undefined. Use raw control transfers for auth board instead.
 
+### Performance Optimization (Kenji Tanaka Review — Session 1)
+38. **VM dispatch: use computed goto, NOT switch** — Cortex-M0+ has no `TBH`, GCC may emit linear scan for large switch. Computed goto (`&&label`) costs 8 cycles/dispatch vs 15-40 for switch. Thread the dispatch (each handler ends with `goto *dispatch_table[*pc++]`). Saves 19K-25K cycles/tick. EASY.
+39. **Trig: use 256-entry quarter-wave LUT + lerp** — 1KB table gives 0.004% accuracy (40x better than needed). Cost ~290 cycles vs ROM SIN at 584. Combined SIN+COS for ~100 cycles vs 1179 from ROM. EASY, ~30 lines.
+40. **SPI master must use DMA** — Current `spi_write_read_blocking` stalls Core 0 for 5120 cycles (2.56% budget). DMA frees those cycles for TinyUSB/GIP. EASY, ~25 lines.
+41. **Memory bank placement matters** — VM interpreter+dispatch in bank 0 (SRAM). VM registers in bank 4 (Core 1 exclusive). Axis double-buffer in bank 2. SPI buffers in bank 3. Equation bytecode in bank 1. Prevents cross-core bank contention stalls.
+42. **GIP_CMD_LED (0x0A) == wheel request command** — Both are command ID 0x0A. For wheels, 0x0A is used for wheel-specific requests (angle, power, vibration), not LED control. Handled in wheel request dispatcher.
+
 ### G29 Protocol Verification (Session 1)
 12. **G29 PID is 0xC24F in PS3 mode, NOT 0xC294** — bridge_config.h has wrong PID. The G29 initially enumerates as a legacy Driving Force device and must be mode-switched to G29 native mode (PID 0xC24F). PID 0xC294 may be the initial/legacy PID before mode switch.
 13. **G29 input report is 12 bytes, not 27** — bridge_config.h defines G29_REPORT_SIZE as 27, but PS3 mode reports are 12 bytes. The entire parser byte map is wrong.
