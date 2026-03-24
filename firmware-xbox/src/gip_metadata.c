@@ -1,11 +1,19 @@
 /**
- * gip_metadata.c — Compiled GIP Metadata Blob (Stub)
+ * gip_metadata.c — Compiled GIP Metadata Blob
  *
- * This will contain the compiled binary metadata for the racing wheel,
- * generated from wheel_metadata.json by compile_metadata.py.
+ * Generated from wheel_metadata.json by tools/compile_metadata.py
+ * To regenerate:
+ *   python3 tools/compile_metadata.py firmware-xbox/data/wheel_metadata.json --c-header \
+ *     > firmware-xbox/include/gip_wheel_metadata.h
  */
-#include <stdint.h>
 
-// TODO: Phase 2 — compile metadata and embed as const array
-const uint8_t gip_metadata_blob[] = {0};
-const uint16_t gip_metadata_blob_len = 0;
+#include "gip_wheel_metadata.h"
+
+// Re-export for external access
+const uint8_t *gip_get_metadata_blob(void) {
+    return gip_wheel_metadata;
+}
+
+uint16_t gip_get_metadata_len(void) {
+    return gip_wheel_metadata_len;
+}

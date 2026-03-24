@@ -1,0 +1,98 @@
+{
+    "MetadataHeader": {
+        "MajorVersion": 1,
+        "MinorVersion": 0
+    },
+    "DeviceMetadata": {
+        "SupportedInSystemCommands": [1, 2, 3, 4, 7],
+        "SupportedOutSystemCommands": [1, 4, 5, 10],
+        "SupportsDeviceFirmwareVersions": [
+            { "Major": 1, "Minor": 0 }
+        ],
+        "SupportedAudioFormats": [],
+        "PreferredTypes": [
+            "Microsoft.Xbox.Input.Wheel",
+            "Windows.Xbox.Input.Wheel",
+            "Windows.Xbox.Input.NavigationController"
+        ],
+        "SupportedInterfaces": [
+            "646979CF-6B71-4E96-8DF9-59E398D7420C",
+            "B8F31FE7-7386-40E9-A9F8-2F21263ACFB7",
+            "9776ff56-9bfd-4581-ad45-b645bba526d6"
+        ]
+    },
+    "Messages": [
+        {
+            "MessageType": 32,
+            "MessageLength": 17,
+            "DataType": "Custom",
+            "IsBigEndian": false,
+            "IsReliable": false,
+            "IsSequenced": false,
+            "IsDownstream": false,
+            "IsUpstream": true,
+            "Period": 0,
+            "PersistenceTimeout": 0
+        },
+        {
+            "MessageType": 33,
+            "MessageLength": 11,
+            "DataType": "Custom",
+            "IsBigEndian": false,
+            "IsReliable": false,
+            "IsSequenced": false,
+            "IsDownstream": false,
+            "IsUpstream": true,
+            "Period": 0,
+            "PersistenceTimeout": 0
+        },
+        {
+            "MessageType": 10,
+            "MessageLength": 3,
+            "DataType": "Custom",
+            "IsBigEndian": false,
+            "IsReliable": false,
+            "IsSequenced": false,
+            "IsDownstream": true,
+            "IsUpstream": false,
+            "Period": 0,
+            "PersistenceTimeout": 0
+        },
+        {
+            "MessageType": 11,
+            "MessageLength": 60,
+            "DataType": "Custom",
+            "IsBigEndian": false,
+            "IsReliable": false,
+            "IsSequenced": false,
+            "IsDownstream": true,
+            "IsUpstream": false,
+            "Period": 0,
+            "PersistenceTimeout": 0
+        },
+        {
+            "MessageType": 12,
+            "MessageLength": 9,
+            "DataType": "Custom",
+            "IsBigEndian": false,
+            "IsReliable": false,
+            "IsSequenced": false,
+            "IsDownstream": true,
+            "IsUpstream": false,
+            "Period": 0,
+            "PersistenceTimeout": 0
+        },
+        {
+            "MessageType": 13,
+            "MessageLength": 53,
+            "DataType": "Custom",
+            "IsBigEndian": false,
+            "IsReliable": false,
+            "IsSequenced": false,
+            "IsDownstream": true,
+            "IsUpstream": false,
+            "Period": 0,
+            "PersistenceTimeout": 0
+        }
+    ]
+}

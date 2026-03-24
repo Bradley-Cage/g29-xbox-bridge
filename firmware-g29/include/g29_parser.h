@@ -54,6 +54,6 @@ typedef struct {
  * Parse a raw G29 HID report (PS3 mode, 12 bytes) into structured state.
  * Returns true if the report was valid.
  */
-bool g29_parse_report(const uint8_t *data, uint8_t len, g29_state_t *state);
+bool g29_parse_report(const uint8_t *data, uint16_t len, g29_state_t *state);
 
 #endif // G29_PARSER_H

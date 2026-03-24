@@ -107,6 +107,8 @@ int main(void) {
         tx_frame.frame_type = FRAME_UP_AXIS_STATE;
         tx_frame.sequence = tx_seq++;
         tx_frame.steering = g29_state.steering;
+        tx_frame.steering_velocity = 0;  // TODO: compute in axis_math.c
+        tx_frame.steering_accel = 0;
         tx_frame.gas = g29_state.gas;
         tx_frame.brake = g29_state.brake;
         tx_frame.clutch = g29_state.clutch;
@@ -141,8 +143,8 @@ int main(void) {
             if (rx_frame.cmd_flags & CMD_FLAG_STOP_ALL_FFB) {
                 g29_ffb_stop_all();
             }
-            // Apply force output
-            g29_ffb_set_constant_force(rx_frame.af_wheel);
+            // Apply force output (convert Q1.14 fixed-point to float)
+            g29_ffb_set_constant_force(spi_force_to_float(rx_frame.af_wheel));
         }
 
         // ── Step 6: FFB tick (250Hz) ──

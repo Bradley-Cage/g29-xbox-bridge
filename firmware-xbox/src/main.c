@@ -105,9 +105,9 @@ int main(void) {
             memset(&tx_frame, 0, sizeof(tx_frame));
             tx_frame.frame_type = FRAME_DN_FORCE_OUTPUT;
             tx_frame.sequence = tx_seq++;
-            tx_frame.af_wheel = forces.af_wheel;
-            tx_frame.af_motor_low = forces.af_motor_low;
-            tx_frame.af_motor_high = forces.af_motor_high;
+            tx_frame.af_wheel = spi_float_to_force(forces.af_wheel);
+            tx_frame.af_motor_low = spi_float_to_force(forces.af_motor_low);
+            tx_frame.af_motor_high = spi_float_to_force(forces.af_motor_high);
             tx_frame.power_level = 255;
             tx_frame.angle_setting = 900;
             spi_set_crc((uint8_t *)&tx_frame);
@@ -122,10 +122,11 @@ int main(void) {
 
             // Validate received frame
             if (spi_validate_frame((const uint8_t *)&rx_frame)) {
-                // Update VM axis state from G29 data
+                // Update VM axis state from G29 data (convert fixed-point to float)
                 eq_vm_update_axes(rx_frame.steering,
                                   rx_frame.gas, rx_frame.brake, rx_frame.clutch,
-                                  rx_frame.steering_velocity, rx_frame.steering_accel);
+                                  spi_velocity_to_float(rx_frame.steering_velocity),
+                                  spi_velocity_to_float(rx_frame.steering_accel));
             }
 
             last_spi_ms = now_ms;

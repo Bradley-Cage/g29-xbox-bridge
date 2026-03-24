@@ -19,7 +19,7 @@
 
 #include <string.h>
 
-bool g29_parse_report(const uint8_t *data, uint8_t len, g29_state_t *state) {
+bool g29_parse_report(const uint8_t *data, uint16_t len, g29_state_t *state) {
     if (len < G29_REPORT_SIZE) {
         state->valid = false;
         return false;
