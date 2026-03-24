@@ -599,8 +599,8 @@ bool eq_dispatch_opcode(vm_state_t *vm, uint8_t opcode,
         // ── SGN ──
         case 0x18: { // SGN
             uint8_t op1 = code[(*pc)++];
-            uint8_t op2 = code[(*pc)++];
             in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
             decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
             if (in1 > 0.0f) out = 1.0f;
             else if (in1 < 0.0f) out = -1.0f;
@@ -609,8 +609,380 @@ bool eq_dispatch_opcode(vm_state_t *vm, uint8_t opcode,
             return true;
         }
 
+        // ── Skip Instructions ──
+
+        case 0x01: { // SKP — unconditional skip N instructions
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint32_t skip_count = (uint32_t)in1;
+            // Skip N instructions — we approximate by skipping N bytes
+            // TODO: proper instruction-counting skip requires instruction length table
+            *pc += (uint16_t)skip_count;
+            if (*pc > code_size) return false; // FAULT: skip past end
+            return true;
+        }
+
+        case 0x02: { // SKPZ — skip if zero
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            if (in1 == 0.0f) {
+                uint32_t skip_count = (uint32_t)in2;
+                *pc += (uint16_t)skip_count;
+                if (*pc > code_size) return false;
+            }
+            return true;
+        }
+
+        case 0x03: { // SKPN — skip if not zero
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            if (in1 != 0.0f) {
+                uint32_t skip_count = (uint32_t)in2;
+                *pc += (uint16_t)skip_count;
+                if (*pc > code_size) return false;
+            }
+            return true;
+        }
+
+        // ── Remaining Math ──
+
+        case 0x14: { // MOD (fmod)
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
+            decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
+            if (in2 == 0.0f) return false; // FAULT
+            out = fmodf(in1, in2);
+            if (w3 && t3) { if (op3 == 0x53) *t3 += out; else *t3 = out; }
+            return true;
+        }
+
+        case 0x16: { // POW3
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            out = in1 * in1 * in1;
+            if (w2 && t2) *t2 = out;
+            return true;
+        }
+
+        case 0x1A: { // INV (1/x)
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            if (in1 == 0.0f) return false; // FAULT
+            out = 1.0f / in1;
+            if (w2 && t2) *t2 = out;
+            return true;
+        }
+
+        // ── Trig extras ──
+
+        case 0x2A: { // PMUL (x * pi)
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            out = in1 * (float)M_PI;
+            if (w2 && t2) *t2 = out;
+            return true;
+        }
+
+        case 0x2B: { // PDIV (x / pi)
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            out = in1 / (float)M_PI;
+            if (w2 && t2) *t2 = out;
+            return true;
+        }
+
+        case 0x2C: { // RAD (degrees to radians)
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            out = in1 * ((float)M_PI / 180.0f);
+            if (w2 && t2) *t2 = out;
+            return true;
+        }
+
+        case 0x2D: { // DEG (radians to degrees)
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            out = in1 * (180.0f / (float)M_PI);
+            if (w2 && t2) *t2 = out;
+            return true;
+        }
+
+        // ── Remaining Boolean ──
+
+        case 0x31: { // OR
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
+            decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
+            out = (in1 != 0.0f || in2 != 0.0f) ? 1.0f : 0.0f;
+            if (w3 && t3) *t3 = out;
+            return true;
+        }
+
+        case 0x32: { // NAND
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
+            decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
+            out = !(in1 != 0.0f && in2 != 0.0f) ? 1.0f : 0.0f;
+            if (w3 && t3) *t3 = out;
+            return true;
+        }
+
+        case 0x34: { // XOR
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
+            decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
+            out = ((in1 != 0.0f) != (in2 != 0.0f)) ? 1.0f : 0.0f;
+            if (w3 && t3) *t3 = out;
+            return true;
+        }
+
+        case 0x35: { // NOT
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            out = (in1 == 0.0f) ? 1.0f : 0.0f;
+            if (w2 && t2) *t2 = out;
+            return true;
+        }
+
+        // ── Remaining Comparison ──
+
+        case 0x42: { // LT
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
+            decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
+            out = (in1 < in2) ? 1.0f : 0.0f;
+            if (w3 && t3) *t3 = out;
+            return true;
+        }
+
+        case 0x43: { // LTE
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
+            decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
+            out = (in1 <= in2) ? 1.0f : 0.0f;
+            if (w3 && t3) *t3 = out;
+            return true;
+        }
+
+        case 0x46: { // EQ (bit comparison)
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
+            decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
+            // Bit comparison — treat as raw 32-bit equality
+            uint32_t a, b;
+            memcpy(&a, &in1, 4);
+            memcpy(&b, &in2, 4);
+            out = (a == b) ? 1.0f : 0.0f;
+            if (w3 && t3) *t3 = out;
+            return true;
+        }
+
+        // ── Bitwise Operations (unsigned) ──
+
+        case 0x50: { // BAND
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
+            decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
+            uint32_t ua, ub, ur;
+            memcpy(&ua, &in1, 4); memcpy(&ub, &in2, 4);
+            ur = ua & ub;
+            float fout; memcpy(&fout, &ur, 4);
+            if (w3 && t3) *t3 = fout;
+            return true;
+        }
+
+        case 0x51: { // BOR
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
+            decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
+            uint32_t ua, ub, ur;
+            memcpy(&ua, &in1, 4); memcpy(&ub, &in2, 4);
+            ur = ua | ub;
+            float fout; memcpy(&fout, &ur, 4);
+            if (w3 && t3) *t3 = fout;
+            return true;
+        }
+
+        // ── Lookup: ARRXY (interpolation — critical for spring profiles) ──
+
+        case 0xA3: { // ARRXY — interpolate along XY pairs in app memory
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1); // base addr
+            uint8_t op2 = code[(*pc)++];
+            in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2); // pair count
+            uint8_t op3 = code[(*pc)++];
+            float in3_val = decode_operand(vm, op3, pc, code, code_size, &w3, &t3); // X value
+            uint8_t op4 = code[(*pc)++];
+            decode_operand(vm, op4, pc, code, code_size, &w1, &t1); // output
+
+            uint32_t base = (uint32_t)in1;
+            uint32_t count = (uint32_t)in2;
+            float x_val = in3_val;
+
+            if (count < 2) return false; // FAULT: need at least 2 pairs
+
+            // Read XY pairs from app memory
+            // Each pair: memory[base + i*2] = X, memory[base + i*2 + 1] = Y
+            float x0 = vm->app_memory[base];
+            float y0 = vm->app_memory[base + 1];
+
+            if (x_val <= x0) {
+                // Extrapolate from first two points
+                float x1 = vm->app_memory[base + 2];
+                float y1 = vm->app_memory[base + 3];
+                float slope = (x1 != x0) ? (y1 - y0) / (x1 - x0) : 0.0f;
+                out = y0 + slope * (x_val - x0);
+            } else {
+                // Find the surrounding pair
+                float prev_x = x0, prev_y = y0;
+                bool found = false;
+                for (uint32_t i = 1; i < count; i++) {
+                    uint32_t addr = base + i * 2;
+                    if (addr + 1 >= 512) return false; // FAULT: out of bounds
+                    float xi = vm->app_memory[addr];
+                    float yi = vm->app_memory[addr + 1];
+
+                    if (x_val <= xi) {
+                        // Interpolate between prev and current
+                        float t = (xi != prev_x) ? (x_val - prev_x) / (xi - prev_x) : 0.0f;
+                        out = prev_y + t * (yi - prev_y);
+                        found = true;
+                        break;
+                    }
+                    prev_x = xi;
+                    prev_y = yi;
+                }
+                if (!found) {
+                    // Extrapolate from last two points
+                    uint32_t last_addr = base + (count - 1) * 2;
+                    float xn = vm->app_memory[last_addr];
+                    float yn = vm->app_memory[last_addr + 1];
+                    float xp = vm->app_memory[last_addr - 2];
+                    float yp = vm->app_memory[last_addr - 1];
+                    float slope = (xn != xp) ? (yn - yp) / (xn - xp) : 0.0f;
+                    out = yn + slope * (x_val - xn);
+                }
+            }
+
+            if (w1 && t1) {
+                if (op4 == 0x53) *t1 += out;
+                else *t1 = out;
+            }
+            return true;
+        }
+
+        // ── Boundary / Interpolation ──
+
+        case 0xA8: { // BND — boundary clamp
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1); // min
+            uint8_t op2 = code[(*pc)++];
+            in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2); // max
+            uint8_t op3 = code[(*pc)++];
+            float in3_val = decode_operand(vm, op3, pc, code, code_size, &w3, &t3); // value
+            uint8_t op4 = code[(*pc)++];
+            decode_operand(vm, op4, pc, code, code_size, &w1, &t1); // output
+
+            if (in3_val <= in1) out = -1.0f;
+            else if (in3_val >= in2) out = 1.0f;
+            else {
+                // Linear interpolation between boundaries
+                out = 2.0f * (in3_val - in1) / (in2 - in1) - 1.0f;
+            }
+            if (w1 && t1) *t1 = out;
+            return true;
+        }
+
+        // ── Conversion ──
+
+        case 0xD0: { // TOFL — unsigned to float
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            // Reinterpret as unsigned then convert
+            uint32_t u; memcpy(&u, &in1, 4);
+            out = (float)u;
+            if (w2 && t2) *t2 = out;
+            return true;
+        }
+
+        case 0xD2: { // DIFF_FL — unsigned difference to float
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
+            in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
+            decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
+            uint32_t ua, ub; memcpy(&ua, &in1, 4); memcpy(&ub, &in2, 4);
+            int32_t diff = (int32_t)(ua - ub);
+            out = (float)diff;
+            if (w3 && t3) *t3 = out;
+            return true;
+        }
+
+        // ── ARR (simple array lookup) ──
+
+        case 0xA1: { // ARR — lookup value in app memory
+            uint8_t op1 = code[(*pc)++];
+            in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1); // base addr
+            uint8_t op2 = code[(*pc)++];
+            in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2); // offset
+            uint8_t op3 = code[(*pc)++];
+            decode_operand(vm, op3, pc, code, code_size, &w3, &t3); // output
+            uint32_t addr = (uint32_t)in1 + (uint32_t)in2;
+            if (addr >= 512) return false; // FAULT: out of bounds
+            out = vm->app_memory[addr];
+            if (w3 && t3) *t3 = out;
+            return true;
+        }
+
         default:
-            // Unknown opcode — skip it (TODO: implement remaining ~30 opcodes)
             printf("[VM] Unknown opcode 0x%02X at PC=%d\n", opcode, *pc - 1);
             return false; // FAULT
     }
