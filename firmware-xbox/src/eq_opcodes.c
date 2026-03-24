@@ -348,12 +348,12 @@ bool eq_dispatch_opcode(vm_state_t *vm, uint8_t opcode,
 
         // ── Basic Math ──
 
-        case 0x10: { // ADD
+        case 0x10: { // ADD — operands decoded sequentially (each may consume immediate bytes)
             uint8_t op1 = code[(*pc)++];
-            uint8_t op2 = code[(*pc)++];
-            uint8_t op3 = code[(*pc)++];
             in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
             in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
             decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
             out = in1 + in2;
             if (w3 && t3) {
@@ -365,10 +365,10 @@ bool eq_dispatch_opcode(vm_state_t *vm, uint8_t opcode,
 
         case 0x11: { // SUB
             uint8_t op1 = code[(*pc)++];
-            uint8_t op2 = code[(*pc)++];
-            uint8_t op3 = code[(*pc)++];
             in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
             in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
             decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
             out = in1 - in2;
             if (w3 && t3) {
@@ -380,10 +380,10 @@ bool eq_dispatch_opcode(vm_state_t *vm, uint8_t opcode,
 
         case 0x12: { // MUL
             uint8_t op1 = code[(*pc)++];
-            uint8_t op2 = code[(*pc)++];
-            uint8_t op3 = code[(*pc)++];
             in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
             in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
             decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
             out = in1 * in2;
             if (w3 && t3) {
@@ -395,10 +395,10 @@ bool eq_dispatch_opcode(vm_state_t *vm, uint8_t opcode,
 
         case 0x13: { // DIV
             uint8_t op1 = code[(*pc)++];
-            uint8_t op2 = code[(*pc)++];
-            uint8_t op3 = code[(*pc)++];
             in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
             in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
             decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
             if (in2 == 0.0f) return false; // FAULT: div by zero
             out = in1 / in2;
@@ -476,10 +476,10 @@ bool eq_dispatch_opcode(vm_state_t *vm, uint8_t opcode,
 
         case 0x40: { // GT
             uint8_t op1 = code[(*pc)++];
-            uint8_t op2 = code[(*pc)++];
-            uint8_t op3 = code[(*pc)++];
             in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
             in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
             decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
             out = (in1 > in2) ? 1.0f : 0.0f;
             if (w3 && t3) *t3 = out;
@@ -488,10 +488,10 @@ bool eq_dispatch_opcode(vm_state_t *vm, uint8_t opcode,
 
         case 0x41: { // GTE
             uint8_t op1 = code[(*pc)++];
-            uint8_t op2 = code[(*pc)++];
-            uint8_t op3 = code[(*pc)++];
             in1 = decode_operand(vm, op1, pc, code, code_size, &w1, &t1);
+            uint8_t op2 = code[(*pc)++];
             in2 = decode_operand(vm, op2, pc, code, code_size, &w2, &t2);
+            uint8_t op3 = code[(*pc)++];
             decode_operand(vm, op3, pc, code, code_size, &w3, &t3);
             out = (in1 >= in2) ? 1.0f : 0.0f;
             if (w3 && t3) *t3 = out;
