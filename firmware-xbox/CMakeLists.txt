@@ -34,6 +34,7 @@ target_link_libraries(firmware_xbox
     pico_multicore
     pico_float          # ROM-accelerated float routines
     hardware_spi
+    hardware_dma
     hardware_watchdog
     hardware_timer
     tinyusb_device
