@@ -27,7 +27,8 @@ typedef struct {
 } eq_force_output_t;
 
 void eq_vm_init(void);
-void eq_vm_main_loop(void);     // Runs on Core 1 — never returns
+void eq_vm_main_loop(void);     // Blocking loop — use eq_vm_tick() for cooperative mode
+void eq_vm_tick(void);          // One cooperative tick — call from Core 1 loop
 
 // Commands from GIP protocol (called from Core 0 via queue)
 void eq_vm_set_equation(uint8_t index, const uint8_t *bytecode,

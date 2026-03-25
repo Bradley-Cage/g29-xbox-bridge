@@ -5,11 +5,11 @@
  * then runs TinyUSB/GIP tasks while DMA handles the bus. Checks for
  * completion before reading the received frame.
  *
- * SPI0 on RP2040 #1:
- *   GPIO 16 = MISO (data from slave)
- *   GPIO 17 = CS   (active low)
- *   GPIO 18 = SCK
- *   GPIO 19 = MOSI (data to slave)
+ * SPI0 on RP2040 #1 (DWEII board — GPIO 16-25 have NO pads):
+ *   GPIO 2 = SCK                     — SPI0_SCK
+ *   GPIO 3 = MOSI (data to slave)    — SPI0_TX
+ *   GPIO 4 = MISO (data from slave)  — SPI0_RX
+ *   GPIO 5 = CS   (active low)       — manual GPIO
  */
 
 #include "spi_protocol.h"
@@ -22,10 +22,10 @@
 #include <stdio.h>
 
 #define SPI_MASTER_PORT     spi0
-#define SPI_MASTER_SCK      18
-#define SPI_MASTER_MOSI     19
-#define SPI_MASTER_MISO     16
-#define SPI_MASTER_CS       17
+#define SPI_MASTER_SCK      2
+#define SPI_MASTER_MOSI     3
+#define SPI_MASTER_MISO     4
+#define SPI_MASTER_CS       5
 
 static int dma_tx_chan = -1;
 static int dma_rx_chan = -1;

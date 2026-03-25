@@ -25,6 +25,12 @@ void __attribute__((section(".time_critical"))) eq_vm_main_loop(void) {
     }
 }
 
+void eq_vm_tick(void) {
+    // Cooperative tick — called from Core 1 loop alongside PIO-USB host.
+    // TODO: Phase 5 — execute one tick of equation evaluation.
+    // For now, no-op. VM work is deferred to Phase 5.
+}
+
 void eq_vm_set_equation(uint8_t index, const uint8_t *bytecode,
                         uint16_t size, uint16_t offset) {
     (void)index; (void)bytecode; (void)size; (void)offset;

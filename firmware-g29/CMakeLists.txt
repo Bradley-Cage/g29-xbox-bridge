@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.13)
 
 # ============================================================================
-# firmware-g29: RP2040 #2 — G29 USB Host + Auth Relay + SPI Slave
+# firmware-g29: RP2040 #2 — G29 USB Host + SPI Slave (auth moved to Board X)
 # ============================================================================
 
 include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
@@ -25,10 +25,10 @@ add_executable(firmware_g29
     src/g29_host.c
     src/g29_parser.c
     src/g29_ffb.c
-    src/auth_relay.c
     src/spi_slave.c
     src/axis_math.c
     src/diagnostics.c
+    src/cdc_debug.c
     # PIO USB HCD for TinyUSB integration
     ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/hcd_pio_usb.c
 )
@@ -49,12 +49,14 @@ target_link_libraries(firmware_g29
     hardware_spi
     hardware_watchdog
     tinyusb_host
+    tinyusb_device
     pico_pio_usb
 )
 
-# UART for debug (native USB is NOT used — PIO handles USB host)
+# Debug output: custom CDC device on native USB (NOT pico_stdio_usb — incompatible with tinyusb_host)
+# Our cdc_debug module provides printf redirection via TinyUSB device CDC
 pico_enable_stdio_usb(firmware_g29 0)
-pico_enable_stdio_uart(firmware_g29 1)
+pico_enable_stdio_uart(firmware_g29 0)
 
 # Generate UF2
 pico_add_extra_outputs(firmware_g29)
@@ -62,3 +64,12 @@ pico_add_extra_outputs(firmware_g29)
 # Compiler warnings + print memory usage
 target_link_options(firmware_g29 PRIVATE -Xlinker --print-memory-usage)
 target_compile_options(firmware_g29 PRIVATE -Wall -Wextra -Wno-unused-parameter)
+
+# ─── CDC Test Build (minimal, no PIO USB host) ───
+add_executable(cdc_test
+    src/cdc_test.c
+)
+target_link_libraries(cdc_test pico_stdlib)
+pico_enable_stdio_usb(cdc_test 1)
+pico_enable_stdio_uart(cdc_test 0)
+pico_add_extra_outputs(cdc_test)

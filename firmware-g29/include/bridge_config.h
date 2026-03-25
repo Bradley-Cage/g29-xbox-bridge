@@ -1,5 +1,5 @@
 /**
- * bridge_config.h — Hardware Configuration for RP2040 #2 (G29 + Auth)
+ * bridge_config.h — Hardware Configuration for RP2040 #2 (G29)
  */
 
 #ifndef BRIDGE_CONFIG_H
@@ -10,13 +10,12 @@
 
 // ─── Pin Assignments ───
 
-// PIO0 USB Host Root Port 0: G29 Wheel (via 68Ω series resistors)
-#define G29_USB_DP_PIN      0   // GPIO 0 → 68Ω → USB-A breakout D+
-#define G29_USB_DM_PIN      1   // GPIO 1 → 68Ω → USB-A breakout D-
+// PIO0 USB Host: G29 Wheel (via 3×200Ω parallel ≈67Ω series resistors)
+#define G29_USB_DP_PIN      0   // GPIO 0 → 3×200Ω → USB-A breakout D+
+#define G29_USB_DM_PIN      1   // GPIO 1 → 3×200Ω → USB-A breakout D-
 
-// PIO0 USB Host Root Port 1: Auth Board (via 68Ω series resistors)
-#define AUTH_USB_DP_PIN     2   // GPIO 2 → 68Ω → Auth board D+
-#define AUTH_USB_DM_PIN     3   // GPIO 3 → 68Ω → Auth board D-
+// NOTE: Auth board (PowerA) moved to Board X (RP2040 #1) GPIO 0/1.
+// GPIO 2/3 on this board are now free.
 
 // SPI1 — Communication to RP2040 #1 (slave mode)
 #define SPI_PORT            spi1
@@ -29,6 +28,29 @@
 #define UART_TX_PIN         16  // GPIO 16 → USB-TTL adapter RX
 #define UART_BAUD           115200
 
+// ─── Xbox GIP USB Interface Class ───
+// All Xbox controllers present this interface for GIP communication
+#define GIP_IFACE_CLASS     0xFF    // Vendor-specific
+#define GIP_IFACE_SUBCLASS  0x47    // GIP
+#define GIP_IFACE_PROTOCOL  0xD0    // GIP protocol
+
+// ─── GIP Command IDs (subset needed for auth host) ───
+#define GIP_HOST_CMD_ACK         0x01
+#define GIP_HOST_CMD_ANNOUNCE    0x02
+#define GIP_HOST_CMD_STATUS      0x03
+#define GIP_HOST_CMD_IDENTIFY    0x04
+#define GIP_HOST_CMD_POWER       0x05
+#define GIP_HOST_CMD_AUTHENTICATE 0x06
+
+// GIP Power States
+#define GIP_HOST_STATE_ON        0x00
+
+// GIP Header Flags
+#define GIP_HOST_FLAG_ACK        0x10
+#define GIP_HOST_FLAG_INTERNAL   0x20
+#define GIP_HOST_FLAG_CHUNK_START 0x40
+#define GIP_HOST_FLAG_CHUNKED    0x80
+
 // ─── USB Identifiers ───
 
 // Logitech G29
@@ -39,7 +61,9 @@
 
 // ─── G29 HID Report ───
 
-#define G29_REPORT_SIZE     12      // PS3 mode: 12 bytes
+#define G29_REPORT_SIZE_LEGACY  27  // Legacy DFGT mode (PID 0xC294)
+#define G29_REPORT_SIZE_NATIVE  12  // Native G29 PS3 mode (PID 0xC24F)
+#define G29_REPORT_SIZE     G29_REPORT_SIZE_LEGACY  // Current active mode
 #define G29_PEDAL_RELEASED  0xFF
 #define G29_PEDAL_PRESSED   0x00
 #define G29_DPAD_NONE       0x08

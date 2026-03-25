@@ -1,8 +1,11 @@
 /**
- * main.c — RP2040 #2: G29 + Auth + SPI Slave
+ * main.c — RP2040 #2: G29 Input + SPI Slave
  *
- * Core 0: PIO USB host (G29 + auth), SPI slave, G29 parsing, FFB output
- * Core 1: Secondary watchdog, SPI DMA management, diagnostics
+ * Core 0: PIO USB host (G29 only), SPI slave, G29 parsing, FFB output
+ * Core 1: Secondary watchdog, diagnostics
+ *
+ * Auth relay has moved to Board X (RP2040 #1) — this board only handles
+ * the G29 wheel and forwards input/FFB over SPI.
  */
 
 #include "hardware/clocks.h"
@@ -15,16 +18,22 @@
 #include "g29_host.h"
 #include "g29_parser.h"
 #include "g29_ffb.h"
-#include "auth_relay.h"
 #include "spi_protocol.h"
+#include "spi_slave.h"
+#include "cdc_debug.h"
 
 #include <stdio.h>
 #include <string.h>
 
+// External: axis_math velocity/acceleration computation
+extern void axis_math_reset(void);
+extern void axis_math_update(uint16_t raw_steering,
+                              int16_t *out_velocity_q8,
+                              int16_t *out_accel_q8);
+
 // ─── Shared state ───
 
 static volatile uint32_t core0_heartbeat = 0;
-static g29_state_t g29_state;
 static spi_upstream_frame_t tx_frame;
 static spi_downstream_frame_t rx_frame;
 
@@ -60,9 +69,11 @@ int main(void) {
     // System clock must be multiple of 12MHz for USB timing
     set_sys_clock_khz(120000, true);
 
-    // Initialize stdio (UART on GPIO 16)
+    // Initialize Pico SDK stdio (no drivers enabled — we add our own)
     stdio_init_all();
-    sleep_ms(500);
+
+    // Initialize CDC debug output on native USB-C port
+    cdc_debug_init();
 
     printf("\n");
     printf("=== G29 Bridge — RP2040 #2 (G29 + Auth) ===\n");
@@ -78,11 +89,8 @@ int main(void) {
     printf("[INIT] G29 USB Host...\n");
     g29_host_init();
 
-    printf("[INIT] Auth Relay...\n");
-    auth_relay_init();
-
     printf("[INIT] SPI Slave...\n");
-    // SPI init will be implemented in spi_slave.c
+    spi_slave_init();
 
     printf("[INIT] Ready. Entering main loop.\n\n");
 
@@ -94,57 +102,62 @@ int main(void) {
         uint32_t now_us = to_us_since_boot(get_absolute_time());
         uint32_t now_ms = now_us / 1000;
 
-        // ── Step 1: Run PIO USB host task ──
+        // ── Step 1: Run PIO USB host task (G29 only) ──
         bool new_report = g29_host_task();
 
-        // ── Step 2: Parse new G29 report ──
+        // ── Step 2: Snapshot G29 state + update velocity on new report ──
+        static g29_state_t gs;  // Local snapshot — not a pointer to shared state
+        static int16_t vel_q8 = 0, accel_q8 = 0;
         if (new_report) {
-            // g29_host_task fills the report — parsing happens inside
+            g29_snapshot_state(&gs);  // Atomic copy, no torn reads
+            axis_math_update(gs.steering, &vel_q8, &accel_q8);
         }
 
-        // ── Step 3: Build upstream SPI frame ──
+        // ── Step 3: Build upstream SPI frame (input only, no auth) ──
         memset(&tx_frame, 0, sizeof(tx_frame));
-        tx_frame.frame_type = FRAME_UP_AXIS_STATE;
         tx_frame.sequence = tx_seq++;
-        tx_frame.steering = g29_state.steering;
-        tx_frame.steering_velocity = 0;  // TODO: compute in axis_math.c
-        tx_frame.steering_accel = 0;
-        tx_frame.gas = g29_state.gas;
-        tx_frame.brake = g29_state.brake;
-        tx_frame.clutch = g29_state.clutch;
-        tx_frame.buttons0 = (g29_state.dpad & 0x0F)
-                          | (g29_state.btn_cross ? 0x10 : 0)
-                          | (g29_state.btn_square ? 0x20 : 0)
-                          | (g29_state.btn_circle ? 0x40 : 0)
-                          | (g29_state.btn_triangle ? 0x80 : 0);
-        tx_frame.buttons1 = (g29_state.btn_r1 ? 0x01 : 0)
-                          | (g29_state.btn_l1 ? 0x02 : 0)
-                          | (g29_state.btn_r2 ? 0x04 : 0)
-                          | (g29_state.btn_l2 ? 0x08 : 0)
-                          | (g29_state.btn_share ? 0x10 : 0)
-                          | (g29_state.btn_options ? 0x20 : 0)
-                          | (g29_state.btn_r3 ? 0x40 : 0)
-                          | (g29_state.btn_l3 ? 0x80 : 0);
-        tx_frame.buttons2 = g29_state.shifter_gear | (g29_state.btn_plus ? 0x80 : 0);
-        tx_frame.buttons3 = (g29_state.btn_minus ? 0x01 : 0)
-                          | (g29_state.btn_dial_right ? 0x02 : 0)
-                          | (g29_state.btn_dial_left ? 0x04 : 0)
-                          | (g29_state.btn_enter ? 0x08 : 0)
-                          | (g29_state.btn_ps ? 0x10 : 0);
         tx_frame.g29_status = g29_get_status();
-        tx_frame.auth_status = auth_relay_connected() ? AUTH_STATUS_CONNECTED : AUTH_STATUS_DISCONNECTED;
+        tx_frame.frame_type = FRAME_UP_AXIS_STATE;
+        tx_frame.steering = gs.steering;
+        tx_frame.steering_velocity = vel_q8;
+        tx_frame.steering_accel = accel_q8;
+        tx_frame.gas = gs.gas;
+        tx_frame.brake = gs.brake;
+        tx_frame.clutch = gs.clutch;
+        tx_frame.buttons0 = (gs.dpad & 0x0F)
+                          | (gs.btn_cross ? 0x10 : 0)
+                          | (gs.btn_square ? 0x20 : 0)
+                          | (gs.btn_circle ? 0x40 : 0)
+                          | (gs.btn_triangle ? 0x80 : 0);
+        tx_frame.buttons1 = (gs.btn_r1 ? 0x01 : 0)
+                          | (gs.btn_l1 ? 0x02 : 0)
+                          | (gs.btn_r2 ? 0x04 : 0)
+                          | (gs.btn_l2 ? 0x08 : 0)
+                          | (gs.btn_share ? 0x10 : 0)
+                          | (gs.btn_options ? 0x20 : 0)
+                          | (gs.btn_r3 ? 0x40 : 0)
+                          | (gs.btn_l3 ? 0x80 : 0);
+        tx_frame.buttons2 = gs.shifter_gear | (gs.btn_plus ? 0x80 : 0);
+        tx_frame.buttons3 = (gs.btn_minus ? 0x01 : 0)
+                          | (gs.btn_dial_right ? 0x02 : 0)
+                          | (gs.btn_dial_left ? 0x04 : 0)
+                          | (gs.btn_enter ? 0x08 : 0)
+                          | (gs.btn_ps ? 0x10 : 0);
         spi_set_crc((uint8_t *)&tx_frame);
 
         // ── Step 4: SPI exchange (slave responds to master clock) ──
-        // TODO: implement in spi_slave.c
+        spi_slave_set_tx_frame(&tx_frame);
+        bool spi_rx_ready = spi_slave_task();
 
-        // ── Step 5: Process downstream commands ──
-        if (spi_validate_frame((const uint8_t *)&rx_frame)) {
-            if (rx_frame.cmd_flags & CMD_FLAG_STOP_ALL_FFB) {
-                g29_ffb_stop_all();
+        // ── Step 5: Process downstream commands (force output only) ──
+        if (spi_rx_ready && spi_slave_get_rx_frame(&rx_frame) &&
+            spi_validate_frame((const uint8_t *)&rx_frame)) {
+            if (rx_frame.frame_type == FRAME_DN_FORCE_OUTPUT) {
+                if (rx_frame.cmd_flags & CMD_FLAG_STOP_ALL_FFB) {
+                    g29_ffb_stop_all();
+                }
+                g29_ffb_set_constant_force(spi_force_to_float(rx_frame.af_wheel));
             }
-            // Apply force output (convert Q1.14 fixed-point to float)
-            g29_ffb_set_constant_force(spi_force_to_float(rx_frame.af_wheel));
         }
 
         // ── Step 6: FFB tick (250Hz) ──
@@ -155,12 +168,14 @@ int main(void) {
 
         // ── Step 7: Periodic status ──
         if (now_ms - last_status >= 5000) {
-            printf("[STATUS] G29:%s Auth:%s Steer=%04X Gas=%02X Brake=%02X\n",
+            printf("[STATUS] G29:%s Steer=%04X Gas=%02X Brake=%02X\n",
                    g29_is_connected() ? "OK" : "--",
-                   auth_relay_connected() ? "OK" : "--",
-                   g29_state.steering, g29_state.gas, g29_state.brake);
+                   gs.steering, gs.gas, gs.brake);
             last_status = now_ms;
         }
+
+        // ── CDC debug flush ──
+        cdc_debug_task();
 
         // ── Watchdog kick ──
         core0_heartbeat++;

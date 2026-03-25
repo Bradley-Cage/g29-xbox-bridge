@@ -22,6 +22,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 // Frame size — fixed, never changes
 #define SPI_FRAME_SIZE      32
@@ -32,6 +33,9 @@
 #define SPI_FRAME_RATE_HZ   1000        // 1 kHz
 #define SPI_TIMEOUT_MS      50          // Error state if no valid frame in 50ms
 #define SPI_AUTH_SEQ_TIMEOUT_MS  500    // Multi-frame auth sequence timeout
+#define SPI_AUTH_MAX_PAYLOAD    256    // Max auth challenge/response size
+#define SPI_AUTH_DN_FRAG_SIZE   16     // Max fragment per downstream frame (reserved[3..18])
+#define SPI_AUTH_UP_FRAG_SIZE   10     // Max fragment per upstream frame (reserved[3..12])
 
 // Fixed-point scale factors
 #define SPI_FORCE_SCALE     16384       // Q1.14 for Af values
@@ -107,6 +111,93 @@ typedef struct __attribute__((packed)) {
 
 _Static_assert(sizeof(spi_downstream_frame_t) == SPI_FRAME_SIZE,
                "Downstream frame must be exactly 32 bytes");
+
+// ─── Auth Fragment Helpers ───
+// Downstream reserved[19] layout when frame_type == FRAME_DN_AUTH_CHALLENGE:
+//   [0]    = total_len  (0 = no auth data)
+//   [1]    = fragment_offset
+//   [2]    = fragment_len (1-16)
+//   [3..18] = fragment data
+//
+// Upstream reserved[13] layout when frame_type == FRAME_UP_AUTH_RESPONSE:
+//   [0]    = total_len  (0 = no auth data)
+//   [1]    = fragment_offset
+//   [2]    = fragment_len (1-10)
+//   [3..12] = fragment data
+
+typedef struct {
+    uint8_t total_len;          // Total payload size
+    uint8_t fragment_offset;    // Offset of this fragment in the full payload
+    uint8_t fragment_len;       // Bytes in this fragment
+} spi_auth_frag_header_t;
+
+// Pack an auth fragment into a downstream frame's reserved[] field
+// Returns bytes of payload packed (0 if nothing to send)
+static inline uint8_t spi_auth_pack_downstream(spi_downstream_frame_t *frame,
+                                                const uint8_t *payload,
+                                                uint8_t total_len,
+                                                uint8_t offset) {
+    if (offset >= total_len) return 0;
+    uint8_t remaining = total_len - offset;
+    uint8_t frag_len = remaining < SPI_AUTH_DN_FRAG_SIZE ? remaining : SPI_AUTH_DN_FRAG_SIZE;
+
+    frame->frame_type = FRAME_DN_AUTH_CHALLENGE;
+    frame->reserved[0] = total_len;
+    frame->reserved[1] = offset;
+    frame->reserved[2] = frag_len;
+    memcpy(&frame->reserved[3], &payload[offset], frag_len);
+    return frag_len;
+}
+
+// Unpack an auth fragment from a downstream frame's reserved[] field
+// Returns fragment length (0 if no auth data)
+static inline uint8_t spi_auth_unpack_downstream(const spi_downstream_frame_t *frame,
+                                                  spi_auth_frag_header_t *hdr,
+                                                  uint8_t *frag_data,
+                                                  uint8_t frag_data_max) {
+    if (frame->frame_type != FRAME_DN_AUTH_CHALLENGE) return 0;
+    hdr->total_len = frame->reserved[0];
+    hdr->fragment_offset = frame->reserved[1];
+    hdr->fragment_len = frame->reserved[2];
+    if (hdr->total_len == 0 || hdr->fragment_len == 0) return 0;
+    if (hdr->fragment_len > SPI_AUTH_DN_FRAG_SIZE) hdr->fragment_len = SPI_AUTH_DN_FRAG_SIZE;
+    uint8_t copy_len = hdr->fragment_len < frag_data_max ? hdr->fragment_len : frag_data_max;
+    memcpy(frag_data, &frame->reserved[3], copy_len);
+    return copy_len;
+}
+
+// Pack an auth fragment into an upstream frame's reserved[] field
+static inline uint8_t spi_auth_pack_upstream(spi_upstream_frame_t *frame,
+                                              const uint8_t *payload,
+                                              uint8_t total_len,
+                                              uint8_t offset) {
+    if (offset >= total_len) return 0;
+    uint8_t remaining = total_len - offset;
+    uint8_t frag_len = remaining < SPI_AUTH_UP_FRAG_SIZE ? remaining : SPI_AUTH_UP_FRAG_SIZE;
+
+    frame->frame_type = FRAME_UP_AUTH_RESPONSE;
+    frame->reserved[0] = total_len;
+    frame->reserved[1] = offset;
+    frame->reserved[2] = frag_len;
+    memcpy(&frame->reserved[3], &payload[offset], frag_len);
+    return frag_len;
+}
+
+// Unpack an auth fragment from an upstream frame's reserved[] field
+static inline uint8_t spi_auth_unpack_upstream(const spi_upstream_frame_t *frame,
+                                                spi_auth_frag_header_t *hdr,
+                                                uint8_t *frag_data,
+                                                uint8_t frag_data_max) {
+    if (frame->frame_type != FRAME_UP_AUTH_RESPONSE) return 0;
+    hdr->total_len = frame->reserved[0];
+    hdr->fragment_offset = frame->reserved[1];
+    hdr->fragment_len = frame->reserved[2];
+    if (hdr->total_len == 0 || hdr->fragment_len == 0) return 0;
+    if (hdr->fragment_len > SPI_AUTH_UP_FRAG_SIZE) hdr->fragment_len = SPI_AUTH_UP_FRAG_SIZE;
+    uint8_t copy_len = hdr->fragment_len < frag_data_max ? hdr->fragment_len : frag_data_max;
+    memcpy(frag_data, &frame->reserved[3], copy_len);
+    return copy_len;
+}
 
 // ─── Fixed-Point Conversion Helpers ───
 
