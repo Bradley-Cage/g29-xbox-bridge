@@ -10,21 +10,7 @@ The Logitech G29 is a great racing wheel, but it doesn't work on Xbox. Microsoft
 
 ## How It Works
 
-```mermaid
-graph LR
-    G29["G29 Wheel"]
-    Auth["Auth Board<br/>(PowerA)"]
-    B2["<b>RP2040 #2 — G29 Board</b><br/>PIO0 Host · G29 Parser<br/>PIO1 Host · Auth Relay<br/>G29 FFB Output"]
-    SPI["SPI Link<br/>10 MHz · 1 kHz<br/>32-byte frames<br/>CRC-8"]
-    B1["<b>RP2040 #1 — Xbox Board</b><br/>GIP Device · Equation VM<br/>FFB Engine · SPI Master"]
-    Xbox["Xbox<br/>Series X"]
-
-    G29 -- USB --> B2
-    Auth -- USB --> B2
-    B2 <-- SPI --> SPI
-    SPI <-- SPI --> B1
-    B1 -- USB --> Xbox
-```
+![Architecture Diagram](docs/architecture.svg)
 
 **Board 1 (Xbox)** — Connects to the Xbox Series X via its native USB-C port. Speaks Microsoft's GIP (Gaming Input Protocol) including the Equation Language bytecode VM for force feedback. Acts as SPI master.
 
