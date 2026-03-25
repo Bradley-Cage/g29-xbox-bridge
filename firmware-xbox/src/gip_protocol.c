@@ -14,6 +14,8 @@
  */
 
 #include "gip_protocol.h"
+#include "gip_wheel.h"
+#include "spi_protocol.h"
 #include "tusb.h"
 
 #include <string.h>
@@ -24,6 +26,11 @@
 static gip_state_t state;
 static uint8_t rx_buf[64];   // Incoming GIP packets from Xbox
 static uint8_t tx_buf[64];   // Outgoing GIP packets to Xbox
+
+// Auth relay buffers
+static uint8_t auth_challenge_buf[SPI_AUTH_MAX_PAYLOAD];
+static uint16_t auth_challenge_len = 0;
+static bool auth_challenge_pending = false;
 
 // External: metadata blob
 extern const uint8_t *gip_get_metadata_blob(void);
@@ -158,9 +165,20 @@ static void handle_power_state(const uint8_t *payload, uint16_t len) {
 }
 
 static void handle_auth(const uint8_t *payload, uint16_t len) {
-    printf("[GIP] Auth command received (%d bytes)\n", len);
-    // TODO: Phase 3 — forward to RP2040 #2 via SPI, relay response back
-    (void)payload;
+    printf("[GIP] Auth challenge received (%d bytes)\n", len);
+
+    if (len > SPI_AUTH_MAX_PAYLOAD) {
+        printf("[GIP] ERROR: auth payload too large (%d > %d)\n",
+               len, SPI_AUTH_MAX_PAYLOAD);
+        return;
+    }
+
+    // Buffer the challenge for the main loop to fragment into SPI frames
+    memcpy(auth_challenge_buf, payload, len);
+    auth_challenge_len = len;
+    auth_challenge_pending = true;
+
+    printf("[GIP] Auth challenge buffered, pending SPI relay\n");
 }
 
 static void handle_wheel_request(const uint8_t *payload, uint16_t len) {
@@ -169,26 +187,8 @@ static void handle_wheel_request(const uint8_t *payload, uint16_t len) {
     uint8_t req_type = payload[0];
     uint16_t req_data = payload[1] | ((uint16_t)payload[2] << 8);
 
-    switch (req_type) {
-        case GIP_WHEEL_REQ_INITIAL:
-            printf("[GIP] Wheel request: initial reports\n");
-            // TODO: send 0x21 (config) then 0x20 (state)
-            break;
-        case GIP_WHEEL_REQ_ANGLE:
-            printf("[GIP] Wheel request: angle=%d degrees\n", req_data);
-            // TODO: forward to RP2040 #2 via SPI to set G29 range
-            break;
-        case GIP_WHEEL_REQ_POWER:
-            printf("[GIP] Wheel request: power=%d\n", req_data & 0xFF);
-            break;
-        case GIP_WHEEL_REQ_VIBRATION:
-            printf("[GIP] Wheel request: vibration motor=%d,%d\n",
-                   payload[1], payload[2]);
-            break;
-        default:
-            printf("[GIP] Unknown wheel request type: 0x%02X\n", req_type);
-            break;
-    }
+    // Delegate to gip_wheel module for all wheel request subtypes
+    gip_wheel_handle_request(req_type, req_data);
 }
 
 static void handle_app_memory(const uint8_t *payload, uint16_t len) {
@@ -310,6 +310,10 @@ void gip_send_input_report(const uint8_t *payload, uint8_t len) {
     gip_send(GIP_CMD_INPUT, 0x00, payload, len);
 }
 
+void gip_send_config_report(const uint8_t *payload, uint8_t len) {
+    gip_send(GIP_CMD_CONFIG, 0x00, payload, len);
+}
+
 void gip_send_hello(void) {
     handle_hello_request();
 }
@@ -318,4 +322,34 @@ uint8_t gip_next_seq(uint8_t command) {
     uint8_t seq = ++state.seq_counters[command];
     if (seq == 0) seq = ++state.seq_counters[command];
     return seq;
+}
+
+// ─── Auth Relay API (called by main loop) ───
+
+uint16_t gip_get_pending_auth(uint8_t *buf, uint16_t buf_max) {
+    if (!auth_challenge_pending) return 0;
+
+    uint16_t len = auth_challenge_len;
+    if (len > buf_max) len = buf_max;
+    memcpy(buf, auth_challenge_buf, len);
+
+    auth_challenge_pending = false;
+    auth_challenge_len = 0;
+    return len;
+}
+
+void gip_submit_auth_response(const uint8_t *response, uint16_t len) {
+    if (len == 0) {
+        printf("[GIP] Auth response empty — auth failed\n");
+        return;
+    }
+
+    printf("[GIP] Sending auth response to Xbox (%d bytes)\n", len);
+    gip_send(GIP_CMD_AUTHENTICATE, 0x00, response, len);
+    state.authenticated = true;
+    printf("[GIP] Auth response sent — authenticated!\n");
+}
+
+bool gip_is_authenticated(void) {
+    return state.authenticated;
 }

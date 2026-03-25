@@ -4,12 +4,11 @@
 
 - [ ] 2x DWEII RP2040-Zero boards (labeled "Board 1" and "Board 2" with tape)
 - [ ] 2x Keesoo USB-A female breakout boards
-- [ ] 4x 68 ohm resistors
+- [ ] 12x 200 ohm resistors (3 parallel per line ≈67Ω)
 - [ ] Hookup wire (22-24 AWG, solid core preferred for breadboard/perfboard)
 - [ ] Soldering iron + solder
-- [ ] USB-TTL serial adapter (FTDI or CH340)
-- [ ] Logitech G29 wheel + pedals + 12V power adapter
-- [ ] PowerA controller (intact — don't open it until Test 0e)
+- [ ] Logitech G29 wheel + pedals + 12V power adapter (set mode switch to **PS3**)
+- [ ] PowerA Wired Controller for Xbox Series X|S (stays intact — do not open it)
 - [ ] 2x USB-C cables (Mac to each RP2040)
 - [ ] Your MacBook Pro
 
@@ -18,7 +17,7 @@
 Take two RP2040-Zero boards. Put a piece of tape on each:
 
 - **Board 1** = "XBOX" — this connects to the Xbox (later) and runs the Equation VM
-- **Board 2** = "G29" — this connects to the G29 wheel and the auth board
+- **Board 2** = "G29" — this connects to the G29 wheel only (debug via USB CDC)
 
 ## Step 2: Flash Board 2 First (No Wiring Yet)
 
@@ -41,49 +40,46 @@ No soldering needed for this step. Just the bare board and a USB-C cable.
 
 **If RPI-RP2 doesn't appear:** Try a different USB-C cable (some are charge-only). Try a different USB port on the Mac.
 
-## Step 3: Connect UART Debug Adapter to Board 2
+## Step 3: Connect to Board 2 Debug Output (USB CDC)
 
-You need to see debug output from Board 2. This requires 2 wires soldered (or use header pins + jumper wires if you have them):
+Board 2 outputs debug over USB CDC on its native USB-C port — no separate UART adapter needed.
 
-| Board 2 Pin | Wire To | Adapter Pin |
-|-------------|---------|-------------|
-| GPIO 16 | → | RX on USB-TTL adapter |
-| GND | → | GND on USB-TTL adapter |
-
-Once wired:
-1. Plug the USB-TTL adapter into your Mac
-2. Plug Board 2 into your Mac via USB-C (to power it)
+1. Plug Board 2 into your Mac via USB-C
+2. Wait ~2 seconds for the CDC device to appear
 3. Run:
    ```bash
    ./tools/scripts/monitor.sh
    ```
+   The script auto-detects the `/dev/tty.usbmodem*` port.
 4. You should see:
    ```
-   === G29 Bridge — RP2040 #2 (G29 + Auth) ===
+   === G29 Bridge — RP2040 #2 (G29) ===
    ```
 
-**If you see nothing:** Check that GPIO 16 goes to the adapter's **RX** pin (not TX). Check the baud rate is 115200. Try `ls /dev/tty.usb*` to see available serial ports.
+**If you see nothing:** Try `ls /dev/tty.usbmodem*` — if no port appears, try a different USB-C cable (must be data-capable). Press the reset button on the board to trigger the boot banner again.
 
 **If you see the banner repeating every second:** The watchdog is resetting. Something in the init is taking too long. Paste the output into Claude Code.
 
-**Checkpoint: You should see the boot banner and status lines in your terminal. The status will show G29:-- Auth:-- because nothing is plugged into the USB breakouts yet. This is correct.**
+**Note:** Board 1 (XBOX) cannot use USB CDC for debug because its native USB port is the Xbox GIP device. Board 1 debug info is relayed through the SPI link and appears in Board 2's CDC output.
+
+**Checkpoint: You should see the boot banner and status lines in your terminal. The status will show G29:-- because nothing is plugged into the USB breakout yet. This is correct.**
 
 ## Step 4: Wire USB-A Breakout #1 (for G29)
 
-This breakout lets the G29 plug into Board 2. You need to solder 4 wires + 2 resistors:
+This breakout lets the G29 plug into Board 2. You need to solder 4 wires + 6 resistors (3 parallel per data line):
 
 ```
-Keesoo USB-A Breakout          68Ω Resistors        Board 2
+Keesoo USB-A Breakout       3×200Ω Parallel (≈67Ω)   Board 2
 ┌─────────────────┐                               ┌──────────┐
 │ VBUS (red)      │──────────── direct ──────────→│ VBUS/5V  │
-│ D+   (green)    │────[68Ω]─────────────────────→│ GPIO 0   │
-│ D-   (white)    │────[68Ω]─────────────────────→│ GPIO 1   │
+│ D+   (green)    │────[3×200Ω]─────────────────────→│ GPIO 0   │
+│ D-   (white)    │────[3×200Ω]─────────────────────→│ GPIO 1   │
 │ GND  (black)    │──────────── direct ──────────→│ GND      │
 └─────────────────┘                               └──────────┘
 ```
 
 **Critical details:**
-- The 68Ω resistors go on **D+ and D- only** (not VBUS or GND)
+- The 3×200Ω parallel groups (≈67Ω) go on **D+ and D- only** (not VBUS or GND)
 - VBUS from the breakout connects to Board 2's **VBUS pad** (5V), NOT 3.3V
 - Double-check D+ is on GPIO 0 and D- is on GPIO 1 (not swapped)
 
@@ -112,7 +108,7 @@ Keesoo USB-A Breakout          68Ω Resistors        Board 2
    - Press gas pedal fully → `Gas` should go from `FF` to `00`
    - Press brake pedal → `Brake` should go from `FF` to `00`
 
-**If the G29 doesn't enumerate:** Check wiring. Try swapping D+ and D- (breakout pin labeling may differ from the standard). Make sure the 68Ω resistors are present.
+**If the G29 doesn't enumerate:** Check wiring. Try swapping D+ and D- (breakout pin labeling may differ from the standard). Make sure the resistor groups are present (3×200Ω parallel per line).
 
 **Paste the UART output into Claude Code** — I can tell you exactly what's happening and fix any issues.
 
@@ -132,10 +128,10 @@ Connect 5 wires between the two boards:
 ```
 Board 1 (XBOX)                    Board 2 (G29)
 ┌──────────────┐                  ┌──────────────┐
-│ GPIO 18 (SCK)│──────────────→  │ GPIO 10 (SCK)│
-│ GPIO 19 (MOSI)│─────────────→  │ GPIO 11 (MOSI)│
-│ GPIO 16 (MISO)│←────────────   │ GPIO 8 (MISO)│
-│ GPIO 17 (CS) │──────────────→  │ GPIO 9  (CS) │
+│ GPIO 2  (SCK)│──────────────→  │ GPIO 10 (SCK)│
+│ GPIO 3 (MOSI)│──────────────→  │ GPIO 11 (MOSI)│
+│ GPIO 4 (MISO)│←─────────────   │ GPIO 8  (MISO)│
+│ GPIO 5  (CS) │──────────────→  │ GPIO 9  (CS) │
 │ GND          │──────────────── │ GND          │
 └──────────────┘                  └──────────────┘
 ```
@@ -156,16 +152,18 @@ Board 1 (XBOX)                    Board 2 (G29)
 
 **If you see SPI CRC errors:** Swap the MOSI and MISO wires between the boards. This is the #1 SPI wiring mistake.
 
-## Step 9: Wire USB-A Breakout #2 (for Auth Board) — LATER
+## Step 9: Wire USB-A Breakout #2 (for PowerA Auth Controller)
 
-Don't wire this until you're ready to open the PowerA controller. Same wiring pattern as breakout #1 but on different GPIOs:
+Same wiring pattern as breakout #1 but on **Board X (Board 1)** GPIO 0/1. The PowerA controller plugs in intact via its USB cable — no need to open it:
 
 ```
-Breakout #2 → 68Ω → Board 2 GPIO 2 (D+)
-Breakout #2 → 68Ω → Board 2 GPIO 3 (D-)
-Breakout #2 → Board 2 VBUS (5V)
-Breakout #2 → Board 2 GND
+Breakout #2 → 3×200Ω parallel → Board 1 GPIO 0 (D+)
+Breakout #2 → 3×200Ω parallel → Board 1 GPIO 1 (D-)
+Breakout #2 → Board 1 VBUS (5V)
+Breakout #2 → Board 1 GND
 ```
+
+**Note:** Board 2 GPIO 2/3 are now free (unused). The PowerA auth controller connects to Board 1 (XBOX) because auth relay runs on Board X.
 
 ## Step 10: Verify on Xbox (Test 2j — Later)
 
@@ -192,7 +190,7 @@ Once SPI is working and both boards are communicating:
 2. **Paste it into Claude Code** — I can diagnose from the messages
 3. **Common fixes:**
    - No UART output → wrong pin or wrong baud rate
-   - G29 not detected → D+/D- swapped, or 68Ω resistors missing
+   - G29 not detected → D+/D- swapped, or resistor groups missing (3×200Ω parallel per line)
    - SPI all errors → MOSI/MISO swapped
    - Board keeps rebooting → watchdog reset, something hanging in init
 4. **To reflash:** Hold BOOT, plug in, run `./tools/scripts/flash.sh g29` or `xbox`

@@ -80,7 +80,18 @@ typedef struct {
 void gip_init(void);
 void gip_task(void);    // Process incoming GIP commands
 void gip_send_input_report(const uint8_t *payload, uint8_t len);
+void gip_send_config_report(const uint8_t *payload, uint8_t len);
 void gip_send_hello(void);
 uint8_t gip_next_seq(uint8_t command);
+
+// Auth relay: called by main loop to shuttle auth data over SPI
+// Returns pending challenge length (0 if none). Clears pending flag.
+uint16_t gip_get_pending_auth(uint8_t *buf, uint16_t buf_max);
+
+// Submit auth response received from RP2040 #2 back to Xbox
+void gip_submit_auth_response(const uint8_t *response, uint16_t len);
+
+// Check if authenticated
+bool gip_is_authenticated(void);
 
 #endif // GIP_PROTOCOL_H

@@ -1,12 +1,15 @@
 # Hardware Test Plan — Phase 0 Gates
 
-**Prerequisites:** Both RP2040-Zero boards wired per wiring guide, USB-TTL debug adapter connected to RP2040 #2 GPIO 16.
+**Prerequisites:** Both RP2040-Zero boards wired per wiring guide.
+
+**Debug output:**
+- RP2040 #2 (G29): USB CDC over USB-C — appears as `/dev/tty.usbmodem*` on Mac
+- RP2040 #1 (XBOX): No direct debug — status relayed to Board 2 via SPI (native USB is the Xbox device)
 
 **Tools needed:**
 ```bash
-# Terminal 1: UART debug monitor
-screen /dev/tty.usbserial-XXXX 115200
-# Exit: Ctrl-A, K, Y
+# Terminal 1: Debug monitor (auto-detects USB CDC or UART port)
+./tools/scripts/monitor.sh
 
 # Terminal 2: USB device inspection
 system_profiler SPUSBDataType
@@ -28,29 +31,27 @@ cp firmware-xbox/build/firmware_xbox.uf2 /Volumes/RPI-RP2/
 
 ### RP2040 #2 (firmware-g29)
 1. Flash `firmware_g29.uf2`
-2. Connect UART adapter to GPIO 16
-3. Open `screen` at 115200
+2. Plug Board 2 into Mac via USB-C (debug output is over USB CDC)
+3. Run `./tools/scripts/monitor.sh` (auto-detects `/dev/tty.usbmodem*`)
 
 **Expected output:**
 ```
-=== G29 Bridge — RP2040 #2 (G29 + Auth) ===
+=== G29 Bridge — RP2040 #2 (G29) ===
 Build: Mar 24 2026 XX:XX:XX
 
 [INIT] G29 USB Host...
 [G29] TinyUSB host initialized on PIO, GPIO 0/1
-[INIT] Auth Relay...
-[AUTH] Root port 1 added on GPIO 2/3
 [INIT] SPI Slave...
 [SPI] Slave initialized on SPI1, DMA channels X/X
 [INIT] Ready. Entering main loop.
 
-[STATUS] G29:-- Auth:-- Steer=0000 Gas=00 Brake=00
+[STATUS] G29:-- Steer=0000 Gas=00 Brake=00
 ```
 
-**PASS:** Startup banner appears. Status shows G29:-- Auth:-- (nothing connected).
+**PASS:** Startup banner appears. Status shows G29:-- (nothing connected).
 
 **FAIL scenarios:**
-- No output → check UART wiring (GPIO 16 = TX → adapter RX), baud rate 115200
+- No output → check USB-C cable supports data (not charge-only), wait 1.5s for CDC enumeration
 - Hangs at init → reflash, try different USB-C cable
 - Watchdog resets (repeating banner) → something in init is hanging >100ms
 
@@ -70,30 +71,13 @@ system_profiler SPUSBDataType | grep -A 5 "045E\|Xbox\|Vendor"
 
 ---
 
-## Test 0b: PIO Dual Root Port
+## Test 0b: ~~PIO Dual Root Port~~ — REMOVED
 
-**Goal:** Verify two USB devices enumerate simultaneously on RP2040 #2's PIO0.
+**This test is no longer needed.** The rearchitecture moved the PowerA auth controller to Board X (RP2040 #1), so each board now has only a single PIO-USB device:
+- Board G (RP2040 #2): G29 wheel on GPIO 0/1
+- Board X (RP2040 #1): PowerA auth controller on GPIO 0/1
 
-### Setup
-- RP2040 #2 flashed with `firmware_g29.uf2`
-- Connect ANY two USB devices to the breakout boards (doesn't need to be G29/auth — a keyboard + mouse works for this test)
-- UART monitor running
-
-**Expected output:**
-```
-[USB] Device mounted: addr=1 VID=XXXX PID=XXXX
-[USB] Device mounted: addr=2 VID=XXXX PID=XXXX
-```
-
-**PASS:** Both devices enumerate with different addresses. No USB errors in UART output.
-
-**FAIL scenarios:**
-- Only one device enumerates → PIO0 dual root port may not work with these pins. Check wiring, try swapping D+/D-.
-- CRC errors or timeouts → 68Ω resistors missing or wrong value, signal integrity issue
-- Second device causes first to drop → PIO state machine exhaustion. This is the blocking risk from Marcus's review.
-
-### Workaround if dual port fails
-Try enumerating each device individually (unplug the other). If both work alone but not together, the dual-root-port approach needs investigation. Fall back to time-multiplexing or USB hub.
+The dual-root-port risk identified in the architecture review is eliminated.
 
 ---
 
@@ -108,7 +92,7 @@ Try enumerating each device individually (unplug the other). If both work alone 
 
 **Expected UART output (after 5 seconds):**
 ```
-[STATUS] G29:-- Auth:-- Steer=0000 Gas=00 Brake=00
+[STATUS] G29:-- Steer=0000 Gas=00 Brake=00
 ```
 
 And on RP2040 #1 (if you can see its output — may need to read from RP2040 #2's SPI error counters):
@@ -122,10 +106,12 @@ And on RP2040 #1 (if you can see its output — may need to read from RP2040 #2'
 - Wire length (<10cm)
 - No loose connections
 
-**SPI wiring note:** The signal names can be confusing. In our setup:
-- RP2040 #1 GPIO 19 (MOSI = master out) → RP2040 #2 GPIO 11 (MOSI = slave in on SPI1)
-- RP2040 #1 GPIO 16 (MISO = master in) ← RP2040 #2 GPIO 8 (MISO = slave out on SPI1)
-- The Pico SDK names MOSI/MISO from the peripheral's perspective, so MOSI on master goes to MOSI on slave (they're the same SPI signal, not crossed).
+**SPI wiring note:**
+- Board 1 GPIO 3 (SPI0 TX = master out) → Board 2 GPIO 11 (SPI1 RX = slave in)
+- Board 1 GPIO 4 (SPI0 RX = master in) ← Board 2 GPIO 8 (SPI1 TX = slave out)
+- Board 1 GPIO 2 (SCK) → Board 2 GPIO 10 (SCK)
+- Board 1 GPIO 5 (CS) → Board 2 GPIO 9 (CS)
+- See [WIRING_REFERENCE.md](WIRING_REFERENCE.md) for the authoritative pin table.
 
 **PASS:** SPI frames exchange at 1kHz. Zero CRC errors over 60 seconds. Status fields propagate (RP2040 #2's G29 status appears in RP2040 #1's output).
 
@@ -180,7 +166,7 @@ Once enumerated, the firmware polls HID reports. Enable raw hex dump for verific
 ```
 [HID] Mounted: addr=1 inst=0 VID=046D PID=C24F
 [HID] Report reception started
-[STATUS] G29:OK Auth:-- Steer=8000 Gas=FF Brake=FF
+[STATUS] G29:OK Steer=8000 Gas=FF Brake=FF
 ```
 
 **Physical verification** — perform each action and watch UART:
@@ -208,25 +194,26 @@ Post the raw dumps in the Claude Code session. I can diff baseline vs. each inpu
 
 ---
 
-## Test 0e: Auth Board Enumeration
+## Test 0e: PowerA Controller Enumeration
 
-**Goal:** Verify the PowerA auth board enumerates on PIO0 root port 1.
+**Goal:** Verify the intact PowerA controller enumerates on Board X (RP2040 #1) PIO-USB host.
 
 ### Setup
-- Auth board extracted from PowerA controller
-- Wired to USB-A breakout #2 (GPIO 2/3 via 68Ω resistors)
-- UART monitor running
+- PowerA controller connected intact via its USB cable to USB-A breakout #2
+- Breakout #2 wired to **Board 1 (XBOX) GPIO 0/1** via 3×200Ω parallel (≈67Ω) resistors
+- Both boards powered, CDC debug monitor running on Board 2 (Board 1 status relayed via SPI)
 
-**Expected UART output:**
+**Expected output (relayed through Board 2 CDC):**
 ```
-[USB] Device mounted: addr=2 VID=XXXX PID=XXXX
+[AUTH] Auth board mounted: VID=XXXX PID=XXXX
 ```
 
-**PASS:** Auth board enumerates. Record the VID/PID — we need these for the auth relay code.
+**PASS:** PowerA enumerates on Board X as a non-G29 device. Record the VID/PID — the auth relay logs these automatically.
 
 **FAIL scenarios:**
-- No enumeration → check wiring, try on Mac first (`system_profiler SPUSBDataType` with the auth board plugged into a USB-A port on the Mac directly)
-- Enumerates then drops → power issue (auth board may need more current than VBUS provides)
+- No enumeration → check breakout wiring on Board 1 GPIO 0/1 (D+/D-), try PowerA directly on Mac first (`system_profiler SPUSBDataType`)
+- Enumerates then drops → power issue (PowerA controller draws ~100mA; verify VBUS from Board 1)
+- Board 1 clock must be 144MHz for PIO-USB timing — verify in firmware-xbox CMakeLists or board config
 
 ---
 
@@ -260,7 +247,7 @@ RP2040 #1 board: ___  RP2040 #2 board: ___
 
 0a-1 RP2040 #2 boot:     [ PASS / FAIL ] _______________
 0a-2 RP2040 #1 USB enum:  [ PASS / FAIL ] VID=_____ PID=_____
-0b   Dual root port:      [ PASS / FAIL ] Dev1=_____ Dev2=_____
+0b   (REMOVED — dual root port no longer needed)
 0c   SPI bus (60s):        [ PASS / FAIL ] CRC errors: _____
 0d-1 G29 initial enum:    [ PASS / FAIL ] PID=_____
 0d-2 G29 mode switch:     [ PASS / FAIL / SKIPPED ] New PID=_____
@@ -285,6 +272,6 @@ Notes: ___________________________________________________________
 5. If watchdog resets: look for the boot banner repeating — something is hanging
 
 **Known risks from architecture review:**
-- Dual root port may not work → fall back to testing each USB port individually
 - G29 re-enumeration may hang → try operating in legacy mode without mode switch
 - SPI MOSI/MISO naming can be confusing → if all CRC errors, swap MOSI↔MISO wires
+- Board X clock must be 144MHz for PIO-USB timing (not the default 125MHz or 200MHz)
