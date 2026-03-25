@@ -11,19 +11,23 @@ The Logitech G29 is a great racing wheel, but it doesn't work on Xbox. Microsoft
 ## How It Works
 
 ```
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │                                                                     │
-  │  G29 Wheel ──USB──► RP2040 #2 (G29 Board) ──SPI 1kHz──► RP2040 #1 (Xbox Board) ──USB──► Xbox Series X
-  │                      ▲                                    │
-  │  Auth Board ──USB────┘                                    │
-  │  (PowerA)    (PIO Host)                                   │
-  │                                                           │
-  │  RP2040 #2 handles:              RP2040 #1 handles:       │
-  │   • G29 HID polling (1kHz)        • Xbox GIP device       │
-  │   • Input parsing                 • Equation Language VM   │
-  │   • Auth board relay              • Force feedback engine  │
-  │   • G29 FFB output                • SPI master             │
-  └─────────────────────────────────────────────────────────────────────┘
+                 RP2040 #2              SPI Link             RP2040 #1
+                (G29 Board)            (10MHz/1kHz)         (Xbox Board)
+              ┌──────────────┐      ┌──────────────┐      ┌──────────────┐
+              │              │      │  32-byte      │      │              │
+ G29 ──USB──► │  PIO0 Host   │──────│  frames w/    │──────│  GIP Device  │──USB──► Xbox
+ Wheel        │  G29 Parser  │      │  CRC-8        │      │  Equation VM │        Series X
+              │              │      └──────────────┘      │  FFB Engine  │
+ Auth  ──USB──► PIO1 Host   │                             │              │
+ Board        │  Auth Relay  │                             │  SPI Master  │
+ (PowerA)     │              │                             │              │
+              └──────────────┘                             └──────────────┘
+
+ Board 2 handles:                    Board 1 handles:
+  • G29 HID polling (1kHz)            • Xbox GIP protocol
+  • Input parsing                     • Equation Language VM
+  • Auth board relay                  • Force feedback engine
+  • G29 FFB output                    • SPI master
 ```
 
 **Board 1 (Xbox)** — Connects to the Xbox Series X via its native USB-C port. Speaks Microsoft's GIP (Gaming Input Protocol) including the Equation Language bytecode VM for force feedback. Acts as SPI master.
