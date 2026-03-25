@@ -1,16 +1,27 @@
 /**
- * g29_parser.c — G29 HID Report Parser (PS3 Mode, Verified Byte Map)
+ * g29_parser.c — G29 HID Report Parser (Legacy DFGT Mode, PID 0xC294)
  *
- * Report layout (12 bytes, Report ID stripped):
- *   Byte 0:  D-pad(3:0) + Cross(4) Square(5) Circle(6) Triangle(7)
- *   Byte 1:  R1(0) L1(1) R2(2) L2(3) Share(4) Options(5) R3(6) L3(7)
- *   Byte 2:  Gear 1-6(0-5) Reverse(6) Plus(7)
- *   Byte 3:  Minus(0) DialR(1) DialL(2) Enter(3) PS(4)
- *   Byte 4-5: Steering 16-bit LE (0x0000=left, 0x8000=center, 0xFFFF=right)
- *   Byte 6:  Gas   (0xFF=released, 0x00=pressed)
- *   Byte 7:  Brake (same)
- *   Byte 8:  Clutch (same)
- *   Byte 9-11: H-shifter analog (unused)
+ * Legacy DFGT report layout (27 bytes, Report ID stripped):
+ *   Byte 0:    Buttons low  — Cross(4) Square(5) Circle(6) Triangle(7)
+ *                             lower nibble: additional buttons TBD
+ *   Byte 1:    Buttons high — R1(0) L1(1) R2(2) L2(3) Share(4) Options(5) R3(6) L3(7)
+ *   Byte 2:    D-pad / hat switch (low nibble, 0x08 = neutral)
+ *   Byte 3:    Steering 8-bit (0x00=left, 0x80=center, 0xFF=right)
+ *   Byte 4:    Combined gas/brake axis (0x7F=neutral, 0x00=gas, 0xFF=brake) — unused
+ *   Byte 5:    Unknown axis (0x7F center)
+ *   Byte 6:    Unknown axis (0x7F center)
+ *   Bytes 7-16:  Zeros / unknown
+ *   Byte 17:   Brake  separate (0x00=released, 0xFF=pressed)
+ *   Byte 18:   Gas    separate (0x00=released, 0xFF=pressed)
+ *   Bytes 19-26: Zeros / unknown
+ *
+ * Pedal note: Legacy raw values are 0x00=released, 0xFF=pressed.
+ * The rest of the pipeline expects inverted convention (0xFF=released, 0x00=pressed)
+ * so we invert here.
+ *
+ * Steering note: Only 8-bit in legacy mode. We scale to 16-bit (x * 257) so the
+ * rest of the pipeline sees a consistent uint16_t range. Full 16-bit resolution
+ * will be available after mode switch to native G29 (PID 0xC24F).
  */
 
 #include "g29_parser.h"
@@ -20,22 +31,19 @@
 #include <string.h>
 
 bool g29_parse_report(const uint8_t *data, uint16_t len, g29_state_t *state) {
-    if (len < G29_REPORT_SIZE) {
+    if (len < G29_REPORT_SIZE_LEGACY) {
         state->valid = false;
         return false;
     }
 
-    // ── Byte 0: D-pad + face buttons ──
-    state->dpad         = data[0] & 0x0F;
-    if (state->dpad > G29_DPAD_NONE) {
-        state->dpad = G29_DPAD_NONE;
-    }
+    // ── Byte 0: Face buttons (upper nibble) ──
+    // Lower nibble bits are unknown/additional buttons in DFGT mode
     state->btn_cross    = (data[0] & 0x10) != 0;
     state->btn_square   = (data[0] & 0x20) != 0;
     state->btn_circle   = (data[0] & 0x40) != 0;
     state->btn_triangle = (data[0] & 0x80) != 0;
 
-    // ── Byte 1: Shoulders + menu ──
+    // ── Byte 1: Shoulders + menu buttons ──
     state->btn_r1       = (data[1] & 0x01) != 0;  // Right paddle
     state->btn_l1       = (data[1] & 0x02) != 0;  // Left paddle
     state->btn_r2       = (data[1] & 0x04) != 0;
@@ -45,24 +53,34 @@ bool g29_parse_report(const uint8_t *data, uint16_t len, g29_state_t *state) {
     state->btn_r3       = (data[1] & 0x40) != 0;
     state->btn_l3       = (data[1] & 0x80) != 0;
 
-    // ── Byte 2: Shifter + plus ──
-    state->shifter_gear = data[2] & 0x7F;
-    state->btn_plus     = (data[2] & 0x80) != 0;
+    // ── Byte 2: D-pad / hat switch (low nibble) ──
+    state->dpad = data[2] & 0x0F;
+    if (state->dpad > G29_DPAD_NONE) {
+        state->dpad = G29_DPAD_NONE;
+    }
 
-    // ── Byte 3: Misc buttons ──
-    state->btn_minus      = (data[3] & 0x01) != 0;
-    state->btn_dial_right = (data[3] & 0x02) != 0;
-    state->btn_dial_left  = (data[3] & 0x04) != 0;
-    state->btn_enter      = (data[3] & 0x08) != 0;
-    state->btn_ps         = (data[3] & 0x10) != 0;
+    // ── Byte 3: Steering (8-bit) ──
+    // Scale 0x00-0xFF to 0x0000-0xFFFF so downstream sees uint16_t range.
+    // Multiply by 257 (0x101): e.g. 0x80 -> 0x8080, 0xFF -> 0xFFFF, 0x00 -> 0x0000
+    state->steering = (uint16_t)data[3] * 257;
 
-    // ── Bytes 4-5: Steering (16-bit LE) ──
-    state->steering = (uint16_t)data[4] | ((uint16_t)data[5] << 8);
+    // ── Bytes 17-18: Separate pedal axes ──
+    // Raw: 0x00 = released, 0xFF = fully pressed
+    // Pipeline expects inverted: 0xFF = released, 0x00 = fully pressed
+    state->brake = 0xFF - data[17];
+    state->gas   = 0xFF - data[18];
 
-    // ── Bytes 6-8: Pedals (inverted: 0xFF=released, 0x00=pressed) ──
-    state->gas    = data[6];
-    state->brake  = data[7];
-    state->clutch = data[8];
+    // ── Clutch: not available in legacy DFGT mode ──
+    state->clutch = G29_PEDAL_RELEASED;
+
+    // ── Shifter / misc buttons: not available in legacy DFGT mode ──
+    state->shifter_gear   = 0;
+    state->btn_plus       = false;
+    state->btn_minus      = false;
+    state->btn_dial_right = false;
+    state->btn_dial_left  = false;
+    state->btn_enter      = false;
+    state->btn_ps         = false;
 
     state->valid = true;
     state->timestamp_us = time_us_64();

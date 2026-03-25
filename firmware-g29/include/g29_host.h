@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "g29_parser.h"
 
 /** Initialize PIO USB host on PIO0, root port 0 (GPIO 0/1). */
 bool g29_host_init(void);
@@ -19,6 +20,9 @@ bool g29_host_task(void);
 
 /** Send a 7-byte FFB command to the G29's interrupt OUT endpoint. */
 bool g29_send_ffb(const uint8_t cmd[7]);
+
+/** Copy current G29 state into caller's buffer (interrupt-safe snapshot). */
+void g29_snapshot_state(g29_state_t *out);
 
 /** Returns true if G29 is enumerated and in native mode. */
 bool g29_is_connected(void);

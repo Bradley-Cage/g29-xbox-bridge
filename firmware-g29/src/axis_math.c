@@ -20,6 +20,7 @@
 
 #include "bridge_config.h"
 #include "spi_protocol.h"
+#include "pico/stdlib.h"
 
 #include <stdint.h>
 
@@ -29,12 +30,15 @@ static float prev_velocity = 0.0f;      // Previous velocity for accel calc
 static float filtered_velocity = 0.0f;  // EMA-filtered velocity
 static float filtered_accel = 0.0f;     // EMA-filtered acceleration
 static bool first_sample = true;
+static uint32_t prev_time_us = 0;       // Timestamp of previous sample
 
 // EMA filter coefficient (0.0-1.0, lower = smoother, higher = more responsive)
 #define AXIS_FILTER_ALPHA   0.15f
 
-// Sample period in seconds (1kHz)
-#define AXIS_DT             0.001f
+// Minimum dt to prevent division by zero / noise spikes (0.5ms)
+#define AXIS_MIN_DT         0.0005f
+// Maximum dt to clamp stale samples (50ms = if no report for 50ms, clamp)
+#define AXIS_MAX_DT         0.05f
 
 void axis_math_reset(void) {
     prev_position = 0.0f;
@@ -42,6 +46,7 @@ void axis_math_reset(void) {
     filtered_velocity = 0.0f;
     filtered_accel = 0.0f;
     first_sample = true;
+    prev_time_us = 0;
 }
 
 void axis_math_update(uint16_t raw_steering,
@@ -50,20 +55,29 @@ void axis_math_update(uint16_t raw_steering,
     // Normalize steering: 0x0000(-1.0) → 0x8000(0.0) → 0xFFFF(+1.0)
     float position = ((float)raw_steering / 32768.0f) - 1.0f;
 
+    uint32_t now_us = to_us_since_boot(get_absolute_time());
+
     if (first_sample) {
         prev_position = position;
         prev_velocity = 0.0f;
+        prev_time_us = now_us;
         first_sample = false;
         *out_velocity_q8 = 0;
         *out_accel_q8 = 0;
         return;
     }
 
+    // Dynamic dt from actual elapsed time between reports
+    float dt = (float)(now_us - prev_time_us) / 1000000.0f;
+    if (dt < AXIS_MIN_DT) dt = AXIS_MIN_DT;
+    if (dt > AXIS_MAX_DT) dt = AXIS_MAX_DT;
+    prev_time_us = now_us;
+
     // Raw velocity (change per second)
-    float raw_velocity = (position - prev_position) / AXIS_DT;
+    float raw_velocity = (position - prev_position) / dt;
 
     // Raw acceleration (change of velocity per second)
-    float raw_accel = (raw_velocity - prev_velocity) / AXIS_DT;
+    float raw_accel = (raw_velocity - prev_velocity) / dt;
 
     // EMA filter
     filtered_velocity = AXIS_FILTER_ALPHA * raw_velocity
