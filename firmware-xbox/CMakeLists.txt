@@ -53,6 +53,8 @@ target_link_libraries(firmware_xbox
     hardware_watchdog
     hardware_timer
     hardware_pio
+    hardware_flash      # For pico_unique_board_id
+    pico_unique_id      # Board serial number for USB descriptor
     tinyusb_device
     tinyusb_host
 )

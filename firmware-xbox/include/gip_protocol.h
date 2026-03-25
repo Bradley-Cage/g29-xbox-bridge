@@ -68,8 +68,10 @@ typedef struct {
 
 // ─── Xbox VID/PID ───
 
-#define XBOX_VID            0x045E  // Microsoft
-#define XBOX_PID            0x0B12  // Xbox Series X|S controller (wired)
+// VID/PID: Using PDP (GP2040-CE proven) instead of Microsoft VID.
+// Microsoft VID 0x045E requires matching auth certificate on the wire.
+#define XBOX_VID            0x0E6F  // PDP (Performance Designed Products)
+#define XBOX_PID            0x02A4  // GP2040-CE compatible
 
 // ─── Keepalive ───
 
