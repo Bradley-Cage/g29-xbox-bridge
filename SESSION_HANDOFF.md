@@ -1,6 +1,70 @@
 # Session Handoff — G29-to-Xbox Bridge
 
-## Date: March 25, 2026
+## Date: March 26, 2026 (Updated)
+
+## MILESTONE: Auth Relay Pipeline Working End-to-End
+
+### Xbox → Board X → Auth Controller → Board X → Xbox — All Links Proven
+
+After a marathon debugging session, **all three USB links are now operational**:
+
+1. **Xbox → Board X** (native USB device): Full GIP handshake — ANNOUNCE, IDENTIFY,
+   Power states, LED/Config, AUTH challenges all flowing correctly.
+2. **Board X → Xbox** (native USB device): Chunked metadata response, ACK handling,
+   all working on first attempt.
+3. **Board X → Auth Controller** (PIO-USB host): Bidirectional GIP communication
+   verified — controller sends ANNOUNCE, IDENTIFY response, and accepts commands.
+
+The auth controller (Xbox Wireless, VID=045E PID=0B12) responds to GIP commands
+via PIO-USB. Its LED illuminates on Power ON. It sends GIP ANNOUNCE packets and
+IDENTIFY descriptor responses.
+
+### Critical Fix: TinyUSB Callback Bug
+PIO-USB IN endpoint transfers completed at the hardware level but TinyUSB's
+`on_rx_complete` callback never fired. Root cause: TinyUSB's event queue/dispatch
+mechanism doesn't work reliably with PIO-USB in dual-stack mode (device + host).
+**Fix: bypass TinyUSB callbacks entirely and poll PIO-USB endpoint state directly
+via `pio_usb_ll_transfer_start()` + polling `ep->has_transfer` / `ep->actual_len`.**
+
+### Current Blocker: Controller Returns 0xC1 "Auth Not Available"
+
+The full auth relay pipeline works — challenges flow Xbox→controller, responses
+flow controller→Xbox. But the controller responds with 0xC1 ("auth not available")
+instead of actual crypto data. The controller likely needs the IDENTIFY handshake
+completed before its auth chip activates.
+
+Status:
+1. ~~Receive ANNOUNCE from controller~~ ✅ DONE
+2. ~~Send Power ON (with INTERNAL flag 0x20)~~ ✅ DONE — controller accepts it
+3. ~~Forward Xbox's auth challenges (cmd=0x06) to controller~~ ✅ DONE
+4. ~~Receive auth responses from controller~~ ✅ DONE (but 0xC1 = not ready)
+5. ~~Relay auth responses back to Xbox~~ ✅ DONE
+6. ACK controller's chunked IDENTIFY response ← **NEXT BLOCKER**
+7. Get real auth crypto data (not 0xC1) from controller
+
+### Key Discovery: ACK Format Problem
+Our GIP ACK packets are not accepted by the controller. Both IDENTIFY chunks
+and auth responses have `needsAck` flag (0x10), but the controller retries
+forever despite our ACKs. The Xbox ACK format for chunked transfers includes
+chunk progress bytes that we don't replicate:
+
+Xbox ACK payload (9 bytes): `00 [cmd] 20 [received_lo] [received_hi] 00 00 [remaining_lo] [remaining_hi]`
+
+Example Xbox ACKs for our 202-byte chunked IDENTIFY:
+- After chunk 0 (58 bytes):  `00 04 20 3A 00 00 00 90 00` (received=58, remaining=144)
+- After chunks 0-2 (174 bytes): `00 04 20 AE 00 00 00 1C 00` (received=174, remaining=28)
+- After all (202 bytes): `00 04 20 CA 00 00 00 00 00` (received=202, remaining=0)
+
+These are raw byte counts, NOT XGIP hashed values. Implementing this format
+for controller-side ACKs is the next step.
+
+Controller behavior observed:
+- Sends ANNOUNCE (cmd=0x02) — stops after Power ON accepted
+- Responds to IDENTIFY request with chunked descriptor (cmd=0x04, flags=0xF0)
+- Retries packets with needsAck indefinitely when ACK not accepted
+- Auth responses: 6-byte `00 C1 00 01 00 00` = "auth chip not available"
+- After disconnect/reconnect: sends INPUT (0x20) and STATUS (0x03) — fully alive
+- LED lights up on Power ON (confirms OUT path works)
 
 ## Current Hardware State
 
@@ -10,101 +74,153 @@ BOARD G (RP2040-Zero labeled "G") — WORKING
 ├── USB-A Breakout #1 → G29 wheel (GPIO 0=D+, GPIO 1=D-)
 │   └── 3×200Ω parallel resistors on D+/D-, VBUS+GND direct
 ├── SPI Slave (GPIO 8=TX, 9=CS, 10=SCK, 11=RX) → Board X
-├── GPIO 3 ← Board S GPIO 14 (UART RX for sniffer debug relay)
-├── GND shared with Board S
-└── Firmware: firmware_g29.uf2 (Build: Mar 25 2026 19:02:04)
+├── GPIO 5 ← Board X GPIO 8 (UART1 RX for debug relay)
+├── GPIO 12 ← Board S GPIO 12 (UART1 — sniffer link, PAUSED)
+├── GND shared with Board X and Board S
+├── 5V shared rail with Board X
+└── Firmware: firmware_g29.uf2 (Build: Mar 26 2026)
+    Features: SPI GIP telemetry decode, UART relay
 
-BOARD X (RP2040-Zero labeled "X") — RUNNING, XBOX NOT DETECTING
+BOARD X (RP2040-Zero labeled "X") — GIP + PIO-USB BOTH WORKING
 ├── USB-C → Xbox Series X (native USB device, GIP protocol)
-├── USB-A Breakout #2 → PowerA controller (GPIO 0=D+, GPIO 1=D-)
+├── USB-A Breakout #2 → Xbox Wireless Controller (GPIO 0=D+, GPIO 1=D-)
 │   └── 3×200Ω parallel resistors on D+/D-, VBUS+GND direct
 ├── SPI Master (GPIO 2=SCK, 3=MOSI, 4=MISO, 5=CS) → Board G
-└── Firmware: firmware_xbox.uf2 (Build: Mar 25 2026 ~19:30)
+├── GPIO 8 = UART1 TX (debug output → Board G GPIO 5)
+├── 5V shared rail with Board G
+└── Firmware: firmware_xbox.uf2 (Build: Mar 26 2026)
     Clock: 120MHz, Watchdog: 2s, Core 1: PIO-USB host + VM
+    DMA: SPI on ch 10/11, PIO-USB on low channels
+    PIO-USB: Pico-PIO-USB 0.5.3 (GP2040-CE fork)
 
-BOARD S (3rd RP2040-Zero labeled "S") — NOT YET FLASHED
-├── GPIO 14 (UART TX) → Board G GPIO 3 (UART RX) — WIRED
-├── GND → Board G GND — WIRED
-├── USB-A Breakout needed on GPIO 0/1 for PowerA (reuse from Board X)
-├── USB-C → Xbox Series X (will be native USB device)
-└── Firmware: needs firmware-sniffer/ built and flashed
+AUTH CONTROLLER — Xbox Wireless Controller (VID=045E, PID=0B12)
+├── Connected via USB-C to Board X USB-A Breakout #2
+├── GIP interface: class=FF/47/D0, endpoints 0x02/0x82
+├── Sends GIP ANNOUNCE, IDENTIFY response
+├── LED illuminates on Power ON command
+└── Auth chip accessible via GIP cmd 0x06
+
+BOARD S (3rd RP2040-Zero labeled "S") — DISCONNECTED
 
 G29 WHEEL
-├── Plugged into Board G USB-A Breakout #1
+├── Can be plugged into Board G USB-A Breakout #1
 ├── Mode switch: PS3
 ├── 12V power adapter: connected
-└── Status: G29:OK in legacy mode (PID C294, 8-bit steering)
-
-POWERА CONTROLLER
-├── Currently plugged into Board X USB-A Breakout #2
-├── Confirmed working directly on Xbox (tested before session)
-└── For sniffer: move breakout from Board X to Board S
+└── Status: Works in legacy mode (PID C294, 8-bit steering)
 ```
 
 ## What Works
-- ✅ G29 input capture: steering (8-bit legacy), gas, brake, buttons all reading correctly
-- ✅ SPI link: 1kHz frame exchange, zero CRC errors, data propagates both directions
-- ✅ Board X USB device: enumerates on Mac as "G29 Xbox Bridge" (VID=0x0E6F PID=0x02A4)
-- ✅ Board X PIO-USB host: PowerA enumerated successfully on GPIO 0/1 (tested earlier)
-- ✅ Board X Core 1: PIO-USB host + cooperative VM ticks running
-- ✅ CDC debug on Board G: reliable, shows G29 status + SPI stats
 
-## What Doesn't Work
-- ❌ Xbox Series X does not detect Board X AT ALL — no brief detection, nothing in Accessories
-- ❌ G29 mode switch (PID C294→C24F) — command sends but G29 doesn't switch. 8-bit steering only.
-- ❌ G29 cold-boot detection — wheel must be unplugged/replugged after Board G powers on
-- ❌ WS2812 LED on Board G — PIO1 init conflicts with PIO0 USB host, disabled for now
+### GIP Protocol (Xbox ↔ Board X)
+- ✅ ANNOUNCE accepted by Xbox on first try (GP2040-CE 28-byte blob)
+- ✅ IDENTIFY metadata via XGIP chunked protocol (202 bytes, 4 chunks)
+- ✅ Xbox sends Power states (0x06 config, 0x05 QUIESCE, 0x00 ON)
+- ✅ Xbox sends LED/Config request (cmd 0x0A)
+- ✅ Xbox sends AUTH challenges (cmd 0x06, 58-byte payloads, 4 rounds)
+- ✅ Proper keepalive (15s, only after auth, correct payload)
+- ✅ Xbox wakes from sleep with audible sound on connection
 
-## Next Step: Build USB Sniffer (Board S)
+### PIO-USB Host (Board X → Auth Controller)
+- ✅ Controller mounts on PIO-USB (VID=045E, PID=0B12)
+- ✅ GIP endpoints found and opened (class FF/47/D0, only first pair)
+- ✅ OUT transfers work — Power ON lights up controller LED
+- ✅ IN transfers work — direct PIO-USB polling (bypasses TinyUSB callbacks)
+- ✅ Controller sends GIP ANNOUNCE (cmd=0x02) with VID/PID
+- ✅ Controller sends IDENTIFY response (cmd=0x04, chunked)
+- ✅ ANNOUNCE handled once (no more Power ON loop)
+- ✅ GIP host state machine reaches READY state
 
-### Purpose
-Capture the exact byte-level GIP handshake between Xbox Series X and the PowerA controller.
-This will show us what the Xbox sends first, what the controller responds with, the authentication
-flow, and the exact timing — so we can replicate it in our firmware.
+### Auth Relay Infrastructure
+- ✅ Auth challenges buffered from Xbox (Core 0) to shared buffer
+- ✅ Core 1 picks up challenges from shared buffer
+- ✅ Challenges forwarded to controller via PIO-USB OUT endpoint
+- ✅ Auth responses received from controller and relayed to Xbox
+- ✅ Challenge dedup by seq (Xbox retries ignored)
+- ✅ Response dedup by seq (controller retries relayed once)
+- ❌ Controller responds with 0xC1 "auth not available" (needs IDENTIFY handshake)
 
-### Sniffer Architecture
-```
-Board S (RP2040 #3):
-  Native USB (device) → Xbox Series X
-    Presents PowerA's exact USB descriptors (VID=0x20D6 PID=0x205B)
-    Forwards all Xbox→PowerA traffic
+### Infrastructure
+- ✅ DMA channel conflict FIXED (SPI ch 10/11, PIO-USB low channels)
+- ✅ Board X stable — no PANIC / watchdog reboot
+- ✅ Board X UART debug on GPIO 8 → Board G UART relay working
+- ✅ Duplicate endpoint bug fixed (only open first EP pair)
 
-  PIO-USB (host, GPIO 0/1) → PowerA controller
-    Hosts the PowerA, forwards all PowerA→Xbox traffic
+## What Doesn't Work Yet
+- ❌ Auth completion — controller returns 0xC1 "not available" instead of crypto data
+- ❌ SPI telemetry from Board X shows stale data (SPI:ERR on Board G side)
+- ❌ UART sniffer relay (Board S → Board G) — paused
+- ❌ G29 mode switch (PID C294→C24F) — unchanged from prior session
 
-  UART TX (GPIO 14) → Board G GPIO 3 (already wired)
-    Dumps every packet in hex with timestamps
-    Board G prints to CDC on Mac
-```
+## Next Steps (Priority Order)
 
-### Physical Setup for Sniffing
-1. Move the PowerA USB-A breakout from Board X GPIO 0/1 → Board S GPIO 0/1
-2. Plug Board S USB-C → Xbox Series X
-3. Board G USB-C → Mac (receives sniffer output via UART relay)
-4. Board X is NOT involved during sniffing (can be disconnected)
+### 1. Fix GIP ACK Format for Controller
+The controller doesn't accept our ACKs, causing infinite retries. The ACK payload
+needs chunk progress bytes (received/remaining counts). Implement the Xbox ACK
+format documented above in the "Key Discovery" section. This will fix both
+IDENTIFY chunk ACKs and auth response ACKs.
 
-### Firmware to Build
-New directory: `firmware-sniffer/`
-- Copies PowerA's USB descriptors (VID=0x20D6, PID=0x205B, class=0xFF/0x47/0xD0)
-- PIO-USB host on GPIO 0/1 for PowerA
-- Bidirectional transparent forwarding of all USB traffic
-- UART TX on GPIO 14 at 115200 baud — hex dump every packet with direction + timestamp
-- Board G firmware update: read UART RX on GPIO 3, print to CDC
+### 2. Complete IDENTIFY Handshake Before Auth
+The controller returns 0xC1 "auth not available" because it needs the IDENTIFY
+handshake completed first. Sequence should be:
+1. Receive ANNOUNCE → send IDENTIFY request (with INTERNAL flag)
+2. Receive IDENTIFY chunks → ACK each with proper chunk progress format
+3. Send Power ON after IDENTIFY completes
+4. Controller auth chip should now be available for challenges
 
-### Key Questions the Sniffer Will Answer
-1. What does the Xbox send FIRST after USB enumeration?
-2. Does the Xbox request the MS OS descriptor?
-3. What is the exact ANNOUNCE (0x02) format from a real controller?
-4. What metadata does the PowerA send?
-5. When does authentication start relative to the GIP handshake?
-6. What are the exact timing requirements?
+### 3. ACK Xbox Auth Challenges
+Xbox sends auth with `needsAck=1` (flags=0x30). We should ACK these to prevent
+Xbox retries. Use same ACK format as controller-side.
 
-## Known Bugs (Lower Priority)
-1. **G29 mode switch** — PID C294→C24F doesn't work via PIO-USB. Leaves wheel in 8-bit steering legacy mode.
-2. **G29 cold-boot detection** — PIO-USB host doesn't detect devices connected before power-on. Requires replug.
-3. **WS2812 LED** — PIO1 initialization interferes with PIO0 USB host. Needs investigation (timing? pin conflict?).
-4. **SPI downstream frames empty** — Board X sends type=00 seq=0 because SPI frame population code runs but no GIP data flows yet.
-5. **Cable sensitivity** — Board X requires specific USB-C cable; some cables cause boot failures or no enumeration.
+### 4. SPI Telemetry
+Board G shows SPI:ERR. The SPI master/slave link needs debugging separately.
+
+## Key Technical Decisions
+
+### PIO-USB: Direct Polling for BOTH IN and OUT (not TinyUSB callbacks)
+TinyUSB's callback mechanism (both `on_rx_complete` and `on_tx_complete`) does NOT
+work reliably with PIO-USB in dual-stack (device+host) mode. Transfers complete at
+the PIO hardware level but TinyUSB never dispatches callbacks.
+
+**Solution for IN (RX)**: Use `pio_usb_ll_transfer_start()` to submit transfers,
+then poll `ep->has_transfer` and `ep->actual_len` in the main loop.
+
+**Solution for OUT (TX)**: Submit via `tuh_edpt_xfer()` (still works for submission),
+but poll the OUT endpoint's `has_transfer` flag to detect completion instead of
+relying on `on_tx_complete` callback. Without this, `tx_pending` stays true forever
+and blocks all subsequent OUT transfers (this was the root cause of auth challenges
+never reaching the controller in the previous session).
+
+### Duplicate Endpoint Prevention
+Xbox Wireless Controller has multiple GIP interfaces sharing the same endpoint
+numbers (e.g., two interfaces both claiming 0x02/0x82). Opening the same endpoint
+twice via `tuh_edpt_open()` corrupts PIO-USB's endpoint pool. Fix: only open the
+FIRST occurrence of each endpoint address.
+
+## GIP Protocol Fixes Applied This Session
+
+| Fix | File | Detail |
+|-----|------|--------|
+| ANNOUNCE payload | gip_protocol.c | GP2040-CE 28-byte blob + 3-byte timestamp |
+| ANNOUNCE flags | gip_protocol.c | internal=1 (0x20), fixed seq=1 |
+| Device descriptor | usb_descriptors.c | bDeviceSubClass/Protocol = 0xFF/0xFF |
+| Endpoint bInterval | usb_descriptors.c | 1ms polling |
+| Config bmAttributes | usb_descriptors.c | 0xA0 remote wakeup |
+| MS OS vendor code | usb_descriptors.c | 0x20 |
+| Security string | usb_descriptors.c | "Xbox Security Method 3..." at index 4 |
+| Metadata blob | gip_wheel_metadata.h | GP2040-CE 202-byte gamepad descriptor |
+| XGIP chunking | gip_protocol.c | Full protocol: 2-byte offset, hashed lengths, end-of-chunk |
+| Single IDENTIFY | gip_protocol.c | Only respond to first request |
+| Sequence matching | gip_protocol.c | Use request's seq for chunked response |
+| Keepalive | gip_protocol.c | 15s interval, after auth, payload {0x80,0,0,0} |
+| PIO-USB RX | auth_host.c | Direct PIO polling (bypass TinyUSB callbacks) |
+| Single EP open | auth_host.c | Only open first endpoint pair (prevent duplicates) |
+| ANNOUNCE once | auth_host.c | Only send Power ON on first ANNOUNCE |
+| Power ON flags | auth_host.c | INTERNAL flag (0x20) required — controller ignores without it |
+| TX completion | auth_host.c | Poll PIO-USB OUT endpoint directly (on_tx_complete callback broken) |
+| ACK queue | auth_host.c | Deferred ACK queue for when tx_pending blocks immediate send |
+| Auth challenge dedup | gip_protocol.c | Track last seq, ignore Xbox retries |
+| Auth response dedup | auth_host.c | Track last seq, relay each response once |
+| Auth flags | auth_host.c | INTERNAL flag on auth challenge forwarding to controller |
 
 ## Build Commands
 ```bash
@@ -117,28 +233,20 @@ cd ~/g29proj/g29-xbox-bridge/firmware-g29/build && cmake .. && make -j4
 cd ~/g29proj/g29-xbox-bridge/firmware-xbox/build && cmake .. && make -j4
 
 # Flash (hold BOOT, plug in, release)
-cp firmware-g29/build/firmware_g29.uf2 /Volumes/RPI-RP2/
 cp firmware-xbox/build/firmware_xbox.uf2 /Volumes/RPI-RP2/
 ```
 
-## Git Status
-Latest commit: `93e7c88` — "Hardware testing: EP OUT fix, passive ANNOUNCE, SPI debug, bring-up fixes"
-Branch: main, pushed to origin
-
-## Key Files
-- `firmware-xbox/src/usb_descriptors.c` — USB descriptors + MS OS
-- `firmware-xbox/src/gip_protocol.c` — GIP state machine
-- `firmware-xbox/src/auth_host.c` — PowerA PIO-USB host + auth relay
-- `firmware-xbox/src/main.c` — Board X main loop (Core 0 + Core 1)
-- `firmware-g29/src/main.c` — Board G main loop with SPI debug
-- `firmware-g29/src/g29_host.c` — G29 PIO-USB host
-- `firmware-g29/src/g29_parser.c` — Legacy DFGT 27-byte report parser
-- `shared/spi_protocol.h` — SPI frame format (synced to both firmware includes)
-- `tasks/lessons.md` — All accumulated learnings and bugs
+## Key Files Changed This Session
+- `firmware-xbox/src/gip_protocol.c` — ANNOUNCE, XGIP chunking, ACK handling, state machine
+- `firmware-xbox/include/gip_protocol.h` — XGIP constants, keepalive fix
+- `firmware-xbox/src/usb_descriptors.c` — Device class, bInterval, MS OS, security string
+- `firmware-xbox/include/gip_wheel_metadata.h` — GP2040-CE 202-byte gamepad descriptor
+- `firmware-xbox/src/auth_host.c` — Direct PIO-USB polling, single EP open, GIP host handshake
 
 ## DWEII RP2040-Zero Pinout Reference
-- Right side: GPIO 0–8 (Pins 1–11)
-- Bottom: GPIO 9–13 (Pins 12–17)
-- Left side: GPIO 14–15, 26–29 (Pins 19–20, 31–35)
-- Top: 3V3, GND, 5V (Pins 37–39)
-- Internal only: GPIO 16 (RGB LED), GPIO 17–25 (NO PADS)
+- Right side: GPIO 0–8
+- Bottom: GPIO 9–12, then jumps to GPIO 26
+- Left side: GPIO 26–29
+- Top: 3V3, GND, 5V
+- **NO PADS:** GPIO 13, 14, 15, 17–25
+- Internal only: GPIO 16 (RGB LED)

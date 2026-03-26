@@ -13,6 +13,9 @@
 #include "pico/multicore.h"
 #include "hardware/watchdog.h"
 #include "hardware/spi.h"
+#include "hardware/uart.h"
+#include "hardware/structs/uart.h"
+#include "hardware/address_mapped.h"
 
 #include "bridge_config.h"
 #include "g29_host.h"
@@ -25,6 +28,41 @@
 
 #include <stdio.h>
 #include <string.h>
+
+// ─── UART RX Relay (Board S sniffer → CDC output) ───
+// Board S UART TX (GPIO 14) → Board G UART RX (GPIO 3)
+#define SNIFFER_UART_ID     uart1
+#define SNIFFER_UART_RX_PIN 5   // GPIO 5 (UART1 RX) ← Board S GPIO 12 (UART1 TX)
+#define SNIFFER_UART_BAUD   115200
+
+static uint32_t uart_total_bytes = 0;
+
+static void sniffer_uart_init(void) {
+    uart_init(SNIFFER_UART_ID, SNIFFER_UART_BAUD);
+    gpio_set_function(SNIFFER_UART_RX_PIN, GPIO_FUNC_UART);
+    // UART idle is HIGH — use pull-up (not pull-down!)
+    gpio_pull_up(SNIFFER_UART_RX_PIN);
+}
+
+// Relay any bytes from UART RX → CDC debug ring buffer
+// Non-blocking: reads whatever is available, up to 128 bytes per call
+// Clears any error flags (framing, overrun, etc.) before reading
+static void sniffer_uart_relay(void) {
+    // Clear any error flags by reading the RSR register
+    hw_clear_bits(&uart_get_hw(SNIFFER_UART_ID)->rsr, 0xF);
+
+    char buf[128];
+    int count = 0;
+    while (uart_is_readable(SNIFFER_UART_ID) && count < (int)sizeof(buf)) {
+        // Read DR directly — bottom 8 bits are data, upper bits are error flags
+        uint32_t dr = uart_get_hw(SNIFFER_UART_ID)->dr;
+        buf[count++] = (char)(dr & 0xFF);
+    }
+    if (count > 0) {
+        uart_total_bytes += count;
+        cdc_debug_write(buf, count);
+    }
+}
 
 // External: axis_math velocity/acceleration computation
 extern void axis_math_reset(void);
@@ -87,6 +125,9 @@ int main(void) {
     multicore_launch_core1(core1_entry);
 
     // Initialize subsystems
+    printf("[INIT] Sniffer UART relay (GPIO 3 RX)...\n");
+    sniffer_uart_init();
+
     printf("[INIT] Status LED...\n");
     // led_status_init();  // DISABLED: testing if PIO1 conflicts with USB host
 
@@ -172,17 +213,30 @@ int main(void) {
 
         // ── Step 7: Periodic status ──
         if (now_ms - last_status >= 5000) {
-            printf("[STATUS] G29:%s SPI(rx=%lu err=%lu) Steer=%04X Gas=%02X Brake=%02X\n",
+            printf("[STATUS] G29:%s SPI(rx=%lu err=%lu) UART=%lu Steer=%04X Gas=%02X Brake=%02X\n",
                    g29_is_connected() ? "OK" : "--",
                    spi_slave_get_rx_count(),
                    spi_slave_get_error_count(),
+                   (unsigned long)uart_total_bytes,
                    gs.steering, gs.gas, gs.brake);
-            // Show last received downstream frame info
+            // Show last received downstream frame info + GIP debug state
             if (spi_slave_get_rx_count() > 0) {
                 printf("  [SPI-DN] type=%02X seq=%d force=%d pwr=%d angle=%d\n",
                        rx_frame.frame_type, rx_frame.sequence,
                        rx_frame.af_wheel, rx_frame.power_level,
                        rx_frame.angle_setting);
+                // GIP debug state from Board X (reserved[15..18])
+                uint8_t gip_flags = rx_frame.reserved[15];
+                uint8_t ann_count = rx_frame.reserved[16];
+                uint8_t auth_host = rx_frame.reserved[17];
+                uint8_t last_cmd  = rx_frame.reserved[18];
+                printf("  [GIP] Xbox:%s Meta:%s Started:%s Auth:%s PowerA:%s Ann=%d LastCmd=%02X\n",
+                       (gip_flags & 0x01) ? "MOUNT" : "---",
+                       (gip_flags & 0x02) ? "SENT" : "---",
+                       (gip_flags & 0x04) ? "ON" : "---",
+                       (gip_flags & 0x08) ? "OK" : "---",
+                       (auth_host & 0x01) ? "CONN" : "---",
+                       ann_count, last_cmd);
             }
             last_status = now_ms;
         }
@@ -200,6 +254,9 @@ int main(void) {
             led_status_set(LED_STATUS_WAITING);        // Blue: waiting for G29
         }
         led_status_update();
+
+        // ── Relay sniffer UART → CDC ──
+        sniffer_uart_relay();
 
         // ── CDC debug flush ──
         cdc_debug_task();

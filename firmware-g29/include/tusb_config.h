@@ -1,8 +1,9 @@
 /**
  * tusb_config.h — TinyUSB Configuration for RP2040 #2 (G29 + Auth)
  *
- * This chip runs USB HOST only (PIO-USB) — no device stack.
- * G29 and PowerA auth board connect via PIO USB host.
+ * This chip runs:
+ *   - USB HOST via PIO-USB (G29 + auth board on PIO0)
+ *   - USB DEVICE on native USB (CDC for debug stdio)
  */
 
 #ifndef _TUSB_CONFIG_H_
@@ -14,7 +15,9 @@ extern "C" {
 
 // ─── Common ───
 #define CFG_TUSB_OS             OPT_OS_PICO
+#ifndef CFG_TUSB_DEBUG
 #define CFG_TUSB_DEBUG          1
+#endif
 
 #ifndef CFG_TUSB_MEM_SECTION
 #define CFG_TUSB_MEM_SECTION
@@ -24,8 +27,11 @@ extern "C" {
 #define CFG_TUSB_MEM_ALIGN      __attribute__((aligned(4)))
 #endif
 
-// ─── Device: DISABLED ───
-#define CFG_TUD_ENABLED         0
+// ─── Device: ENABLED for CDC stdio on native USB-C port ───
+#define CFG_TUD_ENABLED         1
+#define CFG_TUD_CDC             1
+#define CFG_TUD_CDC_RX_BUFSIZE  256
+#define CFG_TUD_CDC_TX_BUFSIZE  256
 
 // ─── Host: ENABLED via PIO-USB ───
 #define CFG_TUH_ENABLED         1

@@ -58,9 +58,11 @@ void spi_master_init(void) {
     gpio_set_dir(SPI_MASTER_CS, GPIO_OUT);
     gpio_put(SPI_MASTER_CS, 1);  // Inactive
 
-    // Claim DMA channels
-    dma_tx_chan = dma_claim_unused_channel(true);
-    dma_rx_chan = dma_claim_unused_channel(true);
+    // Claim DMA channels 10/11 — leave low channels for PIO-USB
+    dma_tx_chan = 10;
+    dma_rx_chan = 11;
+    dma_channel_claim(dma_tx_chan);
+    dma_channel_claim(dma_rx_chan);
 
     // TX DMA config
     dma_channel_config tx_cfg = dma_channel_get_default_config(dma_tx_chan);
