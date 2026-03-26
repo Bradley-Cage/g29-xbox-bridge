@@ -91,6 +91,8 @@ static bool auth_rx_ready = false;
 static uint8_t identify_rx_buf[512];
 static uint16_t identify_rx_offset = 0;
 static bool identify_complete = false;
+static uint16_t identify_total_raw = 0;     // Total raw bytes expected (from XGIP unhash)
+static uint16_t identify_received_raw = 0;  // Cumulative payload bytes received
 
 // Pending ACK queue — deferred when tx_pending blocks immediate send
 #define ACK_QUEUE_SIZE 4
@@ -98,6 +100,8 @@ typedef struct {
     uint8_t cmd;
     uint8_t flags;
     uint8_t seq;
+    uint16_t received;   // Chunk progress: cumulative bytes (0 = simple ACK)
+    uint16_t remaining;  // Chunk progress: bytes remaining
     bool valid;
 } pending_ack_t;
 static pending_ack_t ack_queue[ACK_QUEUE_SIZE];
@@ -162,13 +166,50 @@ static bool gip_parse(const uint8_t *pkt, uint16_t pkt_len,
     return true;
 }
 
+// ─── XGIP Chunk Length Hashing (duplicated from gip_protocol.c) ───
+// Needed to reverse-compute raw byte count from XGIP hashed total
+// in the controller's chunked IDENTIFY response header.
+
+#define GIP_HOST_MAX_CHUNK_DATA  0x3A  // 58 bytes max payload per chunk
+
+static uint16_t xgip_compute_chunk_length_local(uint16_t data_len) {
+    uint16_t i = data_len;
+    uint16_t j = 0;
+    do {
+        if (i < GIP_HOST_MAX_CHUNK_DATA) {
+            if ((j / 0x100) != ((j + i) / 0x100))
+                j = j + (i | 0x80);
+            else
+                j = j + i;
+            i = 0;
+        } else {
+            if ((j + GIP_HOST_MAX_CHUNK_DATA > 0x80) && (j + GIP_HOST_MAX_CHUNK_DATA < 0x100))
+                j = j + GIP_HOST_MAX_CHUNK_DATA + 0x100;
+            else if ((j / 0x100) != ((j + GIP_HOST_MAX_CHUNK_DATA) / 0x100))
+                j = j + (GIP_HOST_MAX_CHUNK_DATA | 0x80);
+            else
+                j = j + GIP_HOST_MAX_CHUNK_DATA;
+            i = i - GIP_HOST_MAX_CHUNK_DATA;
+        }
+    } while (i != 0);
+    return j;
+}
+
+// Reverse-lookup: find raw byte count that produces a given XGIP hash
+static uint16_t xgip_unhash_length(uint16_t hashed) {
+    for (uint16_t raw = 1; raw <= 512; raw++) {
+        if (xgip_compute_chunk_length_local(raw) == hashed)
+            return raw;
+    }
+    return 0;  // Unknown — fall back to short-chunk detection
+}
+
 // Forward declarations
 static void on_tx_complete(tuh_xfer_t *xfer);
 
 // ─── GIP ACK Sender ───
-// GIP ACK format: cmd=0x01, flags=0x20(internal), seq=<matched>,
-// payload(9): [original_flags & ~ACK_BIT, original_cmd, 0,0,0,0,0,0,0]
 
+// Simple ACK (non-chunked): payload = [0x00, cmd, 0x20, 0,0,0,0,0,0]
 static bool send_gip_ack_now(uint8_t acked_cmd, uint8_t acked_flags, uint8_t acked_seq) {
     if (!endpoints_open || ep_out_addr == 0 || tx_pending) return false;
 
@@ -205,30 +246,84 @@ static bool send_gip_ack_now(uint8_t acked_cmd, uint8_t acked_flags, uint8_t ack
         return false;
     }
 
-    printf("[AUTH] ACK sent for cmd=0x%02X seq=%d flags=0x%02X\n",
-           acked_cmd, acked_seq, acked_flags);
+    printf("[AUTH] ACK sent for cmd=0x%02X seq=%d\n", acked_cmd, acked_seq);
     return true;
 }
 
-// Queue an ACK — sends immediately if TX is free, defers otherwise
-static void send_gip_ack(uint8_t acked_cmd, uint8_t acked_flags, uint8_t acked_seq) {
-    if (send_gip_ack_now(acked_cmd, acked_flags, acked_seq)) return;
+// Chunked ACK: includes received/remaining byte counts in payload
+// Matches Xbox ACK format: [0x00, cmd, 0x20, rcv_lo, rcv_hi, 0, 0, rem_lo, rem_hi]
+static bool send_gip_chunked_ack_now(uint8_t acked_cmd, uint8_t acked_seq,
+                                      uint16_t received, uint16_t remaining) {
+    if (!endpoints_open || ep_out_addr == 0 || tx_pending) return false;
 
-    // TX busy — queue for later
+    uint8_t ack_payload[9] = {0};
+    ack_payload[0] = 0x00;
+    ack_payload[1] = acked_cmd;
+    ack_payload[2] = GIP_HOST_FLAG_INTERNAL;
+    ack_payload[3] = (uint8_t)(received & 0xFF);
+    ack_payload[4] = (uint8_t)(received >> 8);
+    // [5..6] = 0x00
+    ack_payload[7] = (uint8_t)(remaining & 0xFF);
+    ack_payload[8] = (uint8_t)(remaining >> 8);
+
+    gip_tx_buf[0] = GIP_HOST_CMD_ACK;
+    gip_tx_buf[1] = GIP_HOST_FLAG_INTERNAL;
+    gip_tx_buf[2] = acked_seq;
+    gip_tx_buf[3] = sizeof(ack_payload);  // 9
+
+    memcpy(&gip_tx_buf[4], ack_payload, sizeof(ack_payload));
+
+    tuh_xfer_t xfer = {
+        .daddr       = auth_dev_addr,
+        .ep_addr     = ep_out_addr,
+        .buffer      = gip_tx_buf,
+        .buflen      = 4 + sizeof(ack_payload),
+        .complete_cb = on_tx_complete,
+        .user_data   = 0,
+    };
+
+    tx_pending = true;
+    if (!tuh_edpt_xfer(&xfer)) {
+        tx_pending = false;
+        return false;
+    }
+
+    printf("[AUTH] Chunked ACK sent: cmd=0x%02X seq=%d rcv=%d rem=%d\n",
+           acked_cmd, acked_seq, received, remaining);
+    return true;
+}
+
+// ─── ACK Queue (handles both simple and chunked ACKs) ───
+
+static void queue_ack(uint8_t cmd, uint8_t flags, uint8_t seq,
+                       uint16_t received, uint16_t remaining) {
     for (int i = 0; i < ACK_QUEUE_SIZE; i++) {
         uint8_t idx = (ack_queue_head + i) % ACK_QUEUE_SIZE;
         if (!ack_queue[idx].valid) {
-            ack_queue[idx].cmd = acked_cmd;
-            ack_queue[idx].flags = acked_flags;
-            ack_queue[idx].seq = acked_seq;
+            ack_queue[idx].cmd = cmd;
+            ack_queue[idx].flags = flags;
+            ack_queue[idx].seq = seq;
+            ack_queue[idx].received = received;
+            ack_queue[idx].remaining = remaining;
             ack_queue[idx].valid = true;
-            printf("[AUTH] ACK queued for cmd=0x%02X seq=%d (tx busy)\n",
-                   acked_cmd, acked_seq);
+            printf("[AUTH] ACK queued: cmd=0x%02X seq=%d (tx busy)\n", cmd, seq);
             return;
         }
     }
-    printf("[AUTH] ACK queue full! Dropped ACK for cmd=0x%02X seq=%d\n",
-           acked_cmd, acked_seq);
+    printf("[AUTH] ACK queue full! Dropped cmd=0x%02X seq=%d\n", cmd, seq);
+}
+
+// Simple ACK — queue if tx busy
+static void send_gip_ack(uint8_t acked_cmd, uint8_t acked_flags, uint8_t acked_seq) {
+    if (send_gip_ack_now(acked_cmd, acked_flags, acked_seq)) return;
+    queue_ack(acked_cmd, acked_flags, acked_seq, 0, 0);
+}
+
+// Chunked ACK — queue if tx busy
+static void send_gip_chunked_ack(uint8_t acked_cmd, uint8_t acked_seq,
+                                   uint16_t received, uint16_t remaining) {
+    if (send_gip_chunked_ack_now(acked_cmd, acked_seq, received, remaining)) return;
+    queue_ack(acked_cmd, 0, acked_seq, received, remaining);
 }
 
 // Drain pending ACKs — called from auth_host_task when TX is free
@@ -236,8 +331,17 @@ static void drain_ack_queue(void) {
     for (int i = 0; i < ACK_QUEUE_SIZE; i++) {
         uint8_t idx = (ack_queue_head + i) % ACK_QUEUE_SIZE;
         if (ack_queue[idx].valid) {
-            if (send_gip_ack_now(ack_queue[idx].cmd, ack_queue[idx].flags,
-                                  ack_queue[idx].seq)) {
+            bool sent;
+            if (ack_queue[idx].received > 0) {
+                sent = send_gip_chunked_ack_now(
+                    ack_queue[idx].cmd, ack_queue[idx].seq,
+                    ack_queue[idx].received, ack_queue[idx].remaining);
+            } else {
+                sent = send_gip_ack_now(
+                    ack_queue[idx].cmd, ack_queue[idx].flags,
+                    ack_queue[idx].seq);
+            }
+            if (sent) {
                 ack_queue[idx].valid = false;
                 ack_queue_head = (idx + 1) % ACK_QUEUE_SIZE;
                 return;  // One per iteration — don't monopolize TX
@@ -427,15 +531,81 @@ static void handle_powerA_announce(const uint8_t *payload, uint16_t len) {
     }
     powerA_initialized = true;
 
-    // Send Power ON immediately — the controller needs this to start
-    // accepting auth challenges. Skip IDENTIFY request; the controller
-    // may send IDENTIFY on its own but we don't need it for auth relay.
-    printf("[AUTH] PowerA ANNOUNCE received — sending Power ON\n");
-    uint8_t power_payload[] = { GIP_HOST_STATE_ON };
-    send_gip(GIP_HOST_CMD_POWER, GIP_HOST_FLAG_INTERNAL, power_payload, sizeof(power_payload));
+    // Send IDENTIFY request first — controller needs this handshake
+    // completed before its auth chip activates. Power ON comes after.
+    printf("[AUTH] PowerA ANNOUNCE — sending IDENTIFY request\n");
+    send_gip(GIP_HOST_CMD_IDENTIFY, GIP_HOST_FLAG_INTERNAL, NULL, 0);
 
-    gip_state = GIP_HOST_READY;
-    printf("[AUTH] GIP host READY — auth relay active\n");
+    identify_rx_offset = 0;
+    identify_complete = false;
+    identify_total_raw = 0;
+    identify_received_raw = 0;
+    gip_state = GIP_HOST_WAIT_IDENTIFY;
+}
+
+static void handle_identify_chunk(const uint8_t *payload, uint16_t payload_len,
+                                    uint8_t flags, uint8_t seq) {
+    bool chunked = (flags & GIP_HOST_FLAG_CHUNKED) != 0;
+    bool chunk_start = (flags & GIP_HOST_FLAG_CHUNK_START) != 0;
+    bool needs_ack = (flags & GIP_HOST_FLAG_ACK) != 0;
+
+    if (!chunked) {
+        // Single-packet IDENTIFY (unlikely for controllers)
+        if (payload_len <= sizeof(identify_rx_buf)) {
+            memcpy(identify_rx_buf, payload, payload_len);
+            identify_rx_offset = payload_len;
+        }
+        identify_complete = true;
+        printf("[AUTH] IDENTIFY single packet (%d bytes)\n", payload_len);
+        if (needs_ack) send_gip_ack(GIP_HOST_CMD_IDENTIFY, flags, seq);
+        return;
+    }
+
+    if (chunk_start) {
+        // First chunk: payload[0..1] = XGIP hashed total length (little-endian)
+        uint16_t hashed_total = payload[0] | ((uint16_t)payload[1] << 8);
+        identify_total_raw = xgip_unhash_length(hashed_total);
+        identify_received_raw = 0;
+        identify_rx_offset = 0;
+        identify_complete = false;
+        printf("[AUTH] IDENTIFY started: hash=0x%04X raw_total=%d\n",
+               hashed_total, identify_total_raw);
+    }
+
+    // Accumulate data (skip 2-byte chunk offset prefix)
+    if (payload_len > 2) {
+        uint16_t data_len = payload_len - 2;
+        if (identify_rx_offset + data_len <= sizeof(identify_rx_buf)) {
+            memcpy(&identify_rx_buf[identify_rx_offset], &payload[2], data_len);
+            identify_rx_offset += data_len;
+        }
+    }
+
+    // Track cumulative raw payload bytes (full payload_len, not just data)
+    identify_received_raw += payload_len;
+
+    // ACK with chunk progress if requested
+    if (needs_ack) {
+        uint16_t remaining = 0;
+        if (identify_total_raw > identify_received_raw)
+            remaining = identify_total_raw - identify_received_raw;
+        send_gip_chunked_ack(GIP_HOST_CMD_IDENTIFY, seq,
+                              identify_received_raw, remaining);
+        printf("[AUTH] IDENTIFY chunk: +%d bytes (rcv=%d rem=%d)\n",
+               payload_len, identify_received_raw, remaining);
+    }
+
+    // Detect completion
+    if (identify_total_raw > 0 && identify_received_raw >= identify_total_raw) {
+        identify_complete = true;
+    } else if (payload_len > 0 && payload_len < GIP_HOST_MAX_CHUNK_DATA && !chunk_start) {
+        identify_complete = true;  // Short last chunk
+    }
+
+    if (identify_complete) {
+        printf("[AUTH] IDENTIFY complete: %d data bytes, %d raw bytes\n",
+               identify_rx_offset, identify_received_raw);
+    }
 }
 
 // Track last auth response seq to de-duplicate controller retries
@@ -505,10 +675,7 @@ static void process_gip_packet(const uint8_t *pkt, uint16_t pkt_len) {
             // controller retries ~3x then stops, which is fine.
             break;
         case GIP_HOST_CMD_IDENTIFY:
-            // Controller sends IDENTIFY chunks unsolicited or in response to request.
-            // We don't need this data for auth relay — just log and ignore.
-            // Don't ACK: we haven't figured out the chunked ACK format yet,
-            // and the controller gives up after 3 retries which is fine.
+            handle_identify_chunk(payload, payload_len, flags, seq);
             break;
         case GIP_HOST_CMD_STATUS:
             if (needs_ack) send_gip_ack(cmd, flags, seq);
@@ -593,6 +760,8 @@ void tuh_umount_cb(uint8_t dev_addr) {
         powerA_initialized = false;
         identify_rx_offset = 0;
         identify_complete = false;
+        identify_total_raw = 0;
+        identify_received_raw = 0;
         last_auth_rx_seq = 0;
         last_auth_rx_seq_valid = false;
         memset(ack_queue, 0, sizeof(ack_queue));
@@ -712,6 +881,16 @@ void auth_host_task(void) {
     // Drain queued ACKs when TX is free
     if (!tx_pending) {
         drain_ack_queue();
+    }
+
+    // After IDENTIFY completes, send Power ON to activate auth chip
+    if (gip_state == GIP_HOST_WAIT_IDENTIFY && identify_complete && !tx_pending) {
+        printf("[AUTH] IDENTIFY done — sending Power ON\n");
+        uint8_t power_payload[] = { GIP_HOST_STATE_ON };
+        send_gip(GIP_HOST_CMD_POWER, GIP_HOST_FLAG_INTERNAL,
+                  power_payload, sizeof(power_payload));
+        gip_state = GIP_HOST_READY;  // Transition even if send queued
+        printf("[AUTH] GIP host READY — auth relay active\n");
     }
 
     // Check for new challenge from Core 0
