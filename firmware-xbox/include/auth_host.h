@@ -33,6 +33,11 @@
 // GIP host flags
 #define GIP_HOST_FLAG_CHUNKED       0x80
 #define GIP_HOST_FLAG_CHUNK_START   0x40
+#define GIP_HOST_FLAG_INTERNAL      0x20
+#define GIP_HOST_FLAG_ACK           0x10
+
+// GIP host ACK command
+#define GIP_HOST_CMD_ACK            0x01
 
 // GIP power states
 #define GIP_HOST_STATE_ON           0x00

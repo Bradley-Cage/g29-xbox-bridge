@@ -106,6 +106,8 @@ int main(void) {
 
     // Auth relay buffer (local — no SPI fragmentation needed)
     uint8_t auth_buf[256];
+    uint16_t auth_pending_len = 0;  // Non-zero if challenge waiting for PowerA
+    uint32_t auth_retry_start = 0;  // When we first tried to forward
 
     while (true) {
         uint32_t now_ms = to_ms_since_boot(get_absolute_time());
@@ -116,15 +118,28 @@ int main(void) {
         // ── GIP protocol task (keepalive, command processing) ──
         gip_task();
 
-        // ── Auth: Forward challenges from Xbox → PowerA (local, no SPI) ──
+        // ── Auth: Forward challenges from Xbox → PowerA (with retry) ──
         {
-            uint16_t clen = gip_get_pending_auth(auth_buf, sizeof(auth_buf));
-            if (clen > 0) {
-                if (auth_host_send_challenge(auth_buf, clen)) {
-                    printf("[AUTH] Challenge forwarded to PowerA (%d bytes)\n", clen);
-                } else {
-                    printf("[AUTH] ERROR: PowerA not ready for challenge\n");
+            // Pick up new challenge from GIP if we don't already have one buffered
+            if (auth_pending_len == 0) {
+                uint16_t clen = gip_get_pending_auth(auth_buf, sizeof(auth_buf));
+                if (clen > 0) {
+                    auth_pending_len = clen;
+                    auth_retry_start = now_ms;
+                    printf("[AUTH] Challenge received from Xbox (%d bytes)\n", clen);
                 }
+            }
+
+            // Try to forward buffered challenge to PowerA
+            if (auth_pending_len > 0) {
+                if (auth_host_send_challenge(auth_buf, auth_pending_len)) {
+                    printf("[AUTH] Challenge forwarded to PowerA (%d bytes)\n", auth_pending_len);
+                    auth_pending_len = 0;
+                } else if (now_ms - auth_retry_start >= 5000) {
+                    printf("[AUTH] ERROR: PowerA not ready after 5s, dropping challenge\n");
+                    auth_pending_len = 0;
+                }
+                // Otherwise: retry next loop iteration
             }
         }
 
@@ -162,6 +177,14 @@ int main(void) {
             tx_frame.af_motor_high = spi_float_to_force(forces.af_motor_high);
             tx_frame.power_level = 255;
             tx_frame.angle_setting = 900;
+
+            // Encode GIP debug state in reserved[15..18]
+            gip_debug_state_t dbg;
+            gip_get_debug_state(&dbg);
+            tx_frame.reserved[15] = dbg.flags;
+            tx_frame.reserved[16] = dbg.announce_count;
+            tx_frame.reserved[17] = dbg.auth_host;
+            tx_frame.reserved[18] = dbg.last_rx_cmd;
 
             spi_set_crc((uint8_t *)&tx_frame);
             spi_master_start_transfer(&tx_frame);

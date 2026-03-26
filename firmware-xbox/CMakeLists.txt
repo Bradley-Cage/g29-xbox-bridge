@@ -42,6 +42,11 @@ target_include_directories(firmware_xbox PRIVATE
 
 target_compile_definitions(firmware_xbox PRIVATE
     PIO_USB_USE_TINYUSB
+    # Redirect stdio UART to UART1 on GPIO 8 (TX only)
+    # Default UART0 GPIO 0/1 conflicts with PIO-USB D+/D-
+    PICO_DEFAULT_UART=1
+    PICO_DEFAULT_UART_TX_PIN=8
+    PICO_DEFAULT_UART_RX_PIN=9
 )
 
 target_link_libraries(firmware_xbox
