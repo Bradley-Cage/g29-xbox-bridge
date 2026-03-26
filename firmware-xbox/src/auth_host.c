@@ -47,6 +47,7 @@ static gip_host_state_t gip_state = GIP_HOST_IDLE;
 static uint8_t gip_seq_counters[256];
 static uint32_t auth_mount_time = 0;
 static bool auth_relay_started = false;
+static uint8_t init_step = 0;  // Post-IDENTIFY initialization step (0-4)
 
 #define AUTH_INIT_DELAY_MS  1000  // Wait 1s after mount before sending to PowerA
 
@@ -758,6 +759,7 @@ void tuh_umount_cb(uint8_t dev_addr) {
         tx_pending = false;
         auth_relay_started = false;
         powerA_initialized = false;
+        init_step = 0;
         identify_rx_offset = 0;
         identify_complete = false;
         identify_total_raw = 0;
@@ -883,14 +885,47 @@ void auth_host_task(void) {
         drain_ack_queue();
     }
 
-    // After IDENTIFY completes, send Power ON to activate auth chip
+    // After IDENTIFY completes, send full initialization sequence
+    // (matches GP2040-CE's proven 4-command sequence)
     if (gip_state == GIP_HOST_WAIT_IDENTIFY && identify_complete && !tx_pending) {
-        printf("[AUTH] IDENTIFY done — sending Power ON\n");
-        uint8_t power_payload[] = { GIP_HOST_STATE_ON };
-        send_gip(GIP_HOST_CMD_POWER, GIP_HOST_FLAG_INTERNAL,
-                  power_payload, sizeof(power_payload));
-        gip_state = GIP_HOST_READY;  // Transition even if send queued
-        printf("[AUTH] GIP host READY — auth relay active\n");
+        static const uint8_t POWER_CONFIG[] = {
+            0x06, 0x62, 0x45, 0xB8, 0x77, 0x26, 0x2C, 0x55,
+            0x53, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F
+        };
+        static const uint8_t POWER_ON[] = { 0x00 };
+        static const uint8_t LED_ON[] = { 0x00, 0x01, 0x14 };
+        static const uint8_t RUMBLE_ENABLE[] = {
+            0x00, 0x0F, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xEB
+        };
+
+        switch (init_step) {
+            case 0:  // Power config (15 bytes)
+                printf("[AUTH] IDENTIFY done — init step 1: power config\n");
+                send_gip(GIP_HOST_CMD_POWER, GIP_HOST_FLAG_INTERNAL,
+                          POWER_CONFIG, sizeof(POWER_CONFIG));
+                init_step = 1;
+                break;
+            case 1:  // Power ON (1 byte)
+                printf("[AUTH] Init step 2: power ON\n");
+                send_gip(GIP_HOST_CMD_POWER, GIP_HOST_FLAG_INTERNAL,
+                          POWER_ON, sizeof(POWER_ON));
+                init_step = 2;
+                break;
+            case 2:  // LED on
+                printf("[AUTH] Init step 3: LED on\n");
+                send_gip(0x0A, 0x00, LED_ON, sizeof(LED_ON));
+                init_step = 3;
+                break;
+            case 3:  // Rumble enable
+                printf("[AUTH] Init step 4: rumble enable\n");
+                send_gip(0x09, 0x00, RUMBLE_ENABLE, sizeof(RUMBLE_ENABLE));
+                init_step = 4;
+                gip_state = GIP_HOST_READY;
+                printf("[AUTH] GIP host READY — auth relay active\n");
+                break;
+            default:
+                break;
+        }
     }
 
     // Check for new challenge from Core 0
