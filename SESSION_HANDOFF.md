@@ -26,45 +26,70 @@ mechanism doesn't work reliably with PIO-USB in dual-stack mode (device + host).
 **Fix: bypass TinyUSB callbacks entirely and poll PIO-USB endpoint state directly
 via `pio_usb_ll_transfer_start()` + polling `ep->has_transfer` / `ep->actual_len`.**
 
-### Current Blocker: Controller Returns 0xC1 "Auth Not Available"
+### Current Blocker: Auth 0xC1 + Controller Crash on Status Query
 
-The full auth relay pipeline works — challenges flow Xbox→controller, responses
-flow controller→Xbox. But the controller responds with 0xC1 ("auth not available")
-instead of actual crypto data. The controller likely needs the IDENTIFY handshake
-completed before its auth chip activates.
+The full auth relay pipeline works end-to-end. IDENTIFY handshake completes
+with proper chunked ACK format. GP2040-CE 4-step init sequence sends correctly.
+Both Xbox Wireless (045E:0B12) and PowerA (20D6:205B) controllers accept init.
+
+But BOTH controllers return `0xC1` ("auth waiting/not available") to 58-byte
+auth challenges, and **crash/disconnect on the 2-byte auth status query**.
+
+Pattern (repeats 4x until Xbox gives up):
+1. Xbox sends 58-byte auth challenge (seq N) → forwarded → 0xC1 response
+2. Xbox sends 2-byte auth status query (seq N+1, payload `01 01`) → forwarded
+3. Controller USB-disconnects immediately after receiving the 2-byte query
+4. Controller remounts, re-initializes, Xbox retries
 
 Status:
 1. ~~Receive ANNOUNCE from controller~~ ✅ DONE
-2. ~~Send Power ON (with INTERNAL flag 0x20)~~ ✅ DONE — controller accepts it
-3. ~~Forward Xbox's auth challenges (cmd=0x06) to controller~~ ✅ DONE
-4. ~~Receive auth responses from controller~~ ✅ DONE (but 0xC1 = not ready)
-5. ~~Relay auth responses back to Xbox~~ ✅ DONE
-6. ACK controller's chunked IDENTIFY response ← **NEXT BLOCKER**
-7. Get real auth crypto data (not 0xC1) from controller
+2. ~~IDENTIFY handshake with chunked ACK~~ ✅ DONE (proper Xbox ACK format)
+3. ~~GP2040-CE 4-step init (power config + ON + LED + rumble)~~ ✅ DONE
+4. ~~Forward Xbox's auth challenges to controller~~ ✅ DONE
+5. ~~Receive auth responses from controller~~ ✅ DONE (0xC1 = waiting)
+6. ~~Relay auth responses back to Xbox~~ ✅ DONE
+7. Fix 2-byte auth status query crash ← **NEXT BLOCKER**
+8. Get real auth crypto data (not 0xC1) from controller
 
-### Key Discovery: ACK Format Problem
-Our GIP ACK packets are not accepted by the controller. Both IDENTIFY chunks
-and auth responses have `needsAck` flag (0x10), but the controller retries
-forever despite our ACKs. The Xbox ACK format for chunked transfers includes
-chunk progress bytes that we don't replicate:
+### Key Discovery: Chunked ACK Format (SOLVED)
+Xbox ACK payload (9 bytes) uses raw byte counts:
+`00 [cmd] 20 [received_lo] [received_hi] 00 00 [remaining_lo] [remaining_hi]`
 
-Xbox ACK payload (9 bytes): `00 [cmd] 20 [received_lo] [received_hi] 00 00 [remaining_lo] [remaining_hi]`
+XGIP unhash needed to convert hashed total to raw total for first ACK's
+remaining field. Both controllers accept this format and advance through
+all IDENTIFY chunks without retrying.
 
-Example Xbox ACKs for our 202-byte chunked IDENTIFY:
-- After chunk 0 (58 bytes):  `00 04 20 3A 00 00 00 90 00` (received=58, remaining=144)
-- After chunks 0-2 (174 bytes): `00 04 20 AE 00 00 00 1C 00` (received=174, remaining=28)
-- After all (202 bytes): `00 04 20 CA 00 00 00 00 00` (received=202, remaining=0)
+### Key Discovery: GP2040-CE Init Sequence
+After IDENTIFY, GP2040-CE sends 4 commands (from XBOneDescriptors.h):
+1. Power config: `{0x06,0x62,0x45,0xB8,0x77,0x26,0x2C,0x55,0x53,...,0x1F}` (15 bytes)
+2. Power ON: `{0x00}` (1 byte)
+3. LED on: `{0x00,0x01,0x14}` (3 bytes, cmd 0x0A)
+4. Rumble enable: `{0x00,0x0F,...,0xEB}` (9 bytes, cmd 0x09)
 
-These are raw byte counts, NOT XGIP hashed values. Implementing this format
-for controller-side ACKs is the next step.
+### Theories for 0xC1 + Crash
+
+1. **Auth challenges arrive too early** — first challenge is buffered from Xbox
+   before controller even mounts. Controller gets a stale challenge immediately
+   after init, before auth chip settles. Try: delay auth forwarding 500ms after
+   init, or discard pre-init challenges.
+
+2. **2-byte query format wrong** — payload `01 01` might need different GIP
+   wrapping or flags when sent to controller vs what Xbox sends.
+
+3. **0xC1 IS the correct "processing" response** — controller needs time to
+   compute crypto. The 2-byte query arriving during computation causes crash.
+   Try: wait for controller to send the real response on its own, don't forward
+   the 2-byte queries.
+
+4. **PIO-USB throughput** — rapid command succession (init + challenge + query)
+   may overwhelm PIO-USB. Try: add inter-command delays.
 
 Controller behavior observed:
-- Sends ANNOUNCE (cmd=0x02) — stops after Power ON accepted
-- Responds to IDENTIFY request with chunked descriptor (cmd=0x04, flags=0xF0)
-- Retries packets with needsAck indefinitely when ACK not accepted
-- Auth responses: 6-byte `00 C1 00 01 00 00` = "auth chip not available"
-- After disconnect/reconnect: sends INPUT (0x20) and STATUS (0x03) — fully alive
-- LED lights up on Power ON (confirms OUT path works)
+- PowerA (20D6:205B): 3 GIP interfaces, endpoints 0x01/0x81
+- Xbox Wireless (045E:0B12): 6 GIP interfaces, endpoints 0x02/0x82
+- Both complete IDENTIFY + init, both return 0xC1, both crash on 2-byte query
+- PowerA sends INPUT (0x20), CONFIG (0x21), VIRTUAL_KEY (0x07) — fully alive
+- PowerA sends STATUS with `80 00 00 00` (wired, no battery)
 
 ## Current Hardware State
 
