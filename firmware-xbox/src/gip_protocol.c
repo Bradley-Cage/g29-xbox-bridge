@@ -573,9 +573,17 @@ void gip_submit_auth_response(const uint8_t *response, uint16_t len) {
     }
 
     printf("[GIP] Sending auth response to Xbox (%d bytes)\n", len);
-    gip_send(GIP_CMD_AUTHENTICATE, 0x00, response, len);
-    state.authenticated = true;
-    printf("[GIP] Auth response sent — authenticated!\n");
+    // Use INTERNAL flag (0x20) — matches how all GIP host commands use this flag
+    gip_send(GIP_CMD_AUTHENTICATE, GIP_FLAG_INTERNAL, response, len);
+
+    // Don't set authenticated on 0xC1 "waiting" responses — only on real crypto data
+    // Real auth responses are 44+ bytes; 0xC1 status is always 6 bytes
+    if (len > 6) {
+        state.authenticated = true;
+        printf("[GIP] Auth PASSED — real crypto response (%d bytes)\n", len);
+    } else {
+        printf("[GIP] Auth status relayed (%d bytes, waiting for crypto)\n", len);
+    }
 }
 
 bool gip_is_authenticated(void) {

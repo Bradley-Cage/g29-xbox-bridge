@@ -47,7 +47,9 @@ static gip_host_state_t gip_state = GIP_HOST_IDLE;
 static uint8_t gip_seq_counters[256];
 static uint32_t auth_mount_time = 0;
 static bool auth_relay_started = false;
-static uint8_t init_step = 0;  // Post-IDENTIFY initialization step (0-4)
+static uint8_t init_step = 0;       // Post-IDENTIFY initialization step (0-4)
+static uint32_t init_complete_ms = 0; // Timestamp when init finished
+#define AUTH_SETTLE_DELAY_MS 500      // Wait after init before forwarding auth
 
 #define AUTH_INIT_DELAY_MS  1000  // Wait 1s after mount before sending to PowerA
 
@@ -760,6 +762,7 @@ void tuh_umount_cb(uint8_t dev_addr) {
         auth_relay_started = false;
         powerA_initialized = false;
         init_step = 0;
+        init_complete_ms = 0;
         identify_rx_offset = 0;
         identify_complete = false;
         identify_total_raw = 0;
@@ -920,17 +923,21 @@ void auth_host_task(void) {
                 printf("[AUTH] Init step 4: rumble enable\n");
                 send_gip(0x09, 0x00, RUMBLE_ENABLE, sizeof(RUMBLE_ENABLE));
                 init_step = 4;
+                init_complete_ms = to_ms_since_boot(get_absolute_time());
                 gip_state = GIP_HOST_READY;
-                printf("[AUTH] GIP host READY — auth relay active\n");
+                printf("[AUTH] GIP host READY — auth relay active (settle %dms)\n",
+                       AUTH_SETTLE_DELAY_MS);
                 break;
             default:
                 break;
         }
     }
 
-    // Check for new challenge from Core 0
-    if (challenge_ready && gip_state == GIP_HOST_READY && !auth_tx_queued) {
+    // Check for new challenge from Core 0 (after settle delay)
+    if (challenge_ready && gip_state == GIP_HOST_READY && !auth_tx_queued &&
+        (to_ms_since_boot(get_absolute_time()) - init_complete_ms >= AUTH_SETTLE_DELAY_MS)) {
         __dmb();  // Acquire barrier — ensure we see Core 0's data writes
+
         memcpy(auth_tx_buf, challenge_buf, challenge_len);
         auth_tx_len = challenge_len;
         auth_tx_offset = 0;
