@@ -101,8 +101,11 @@ int main(void) {
 
     uint32_t last_spi_ms = 0;
     uint32_t last_status_ms = 0;
+    uint32_t last_input_ms = 0;
     uint8_t tx_seq = 0;
     bool spi_pending = false;
+
+    #define INPUT_REPORT_INTERVAL_MS 4  // ~250 Hz input reports to Xbox
 
     // Auth relay buffer (local — no SPI fragmentation needed)
     uint8_t auth_buf[256];
@@ -162,6 +165,29 @@ int main(void) {
                                   spi_velocity_to_float(rx_frame.steering_accel));
             }
             spi_pending = false;
+        }
+
+        // ── Send wheel input report to Xbox at ~250Hz ──
+        // TEMPORARY: bypass SPI gate, send hardcoded test data
+        // to verify Xbox accepts our input report format.
+        // TODO: restore g29_status check after SPI data path is fixed
+        if (now_ms - last_input_ms >= INPUT_REPORT_INTERVAL_MS &&
+            tud_vendor_mounted() && gip_is_authenticated()) {
+            uint8_t report[8];
+            uint8_t report_len;
+            if (rx_frame.g29_status == G29_STATUS_CONNECTED) {
+                // Real G29 data via SPI
+                gip_wheel_build_state_report(&rx_frame, report, &report_len);
+            } else {
+                // Hardcoded test: centered wheel, pedals released
+                memset(report, 0, 8);
+                report[2] = 0xFF;  // Steering center low (0x7FFF)
+                report[3] = 0x7F;  // Steering center high
+                // Brake [4-5] = 0 (released), Gas [6-7] = 0 (released)
+                report_len = 8;
+            }
+            gip_send_input_report(report, report_len);
+            last_input_ms = now_ms;
         }
 
         // ── SPI: Start new transfer at 1kHz (input + force output only) ──
