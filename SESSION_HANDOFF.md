@@ -2,9 +2,9 @@
 
 ## Date: March 26, 2026 (Updated)
 
-## MILESTONE: Auth Relay Pipeline Working End-to-End
+## MILESTONE: Xbox Authentication PASSED
 
-### Xbox → Board X → Auth Controller → Board X → Xbox — All Links Proven
+### Full Auth Passthrough Working — Xbox Accepts Crypto Responses
 
 After a marathon debugging session, **all three USB links are now operational**:
 
@@ -26,30 +26,32 @@ mechanism doesn't work reliably with PIO-USB in dual-stack mode (device + host).
 **Fix: bypass TinyUSB callbacks entirely and poll PIO-USB endpoint state directly
 via `pio_usb_ll_transfer_start()` + polling `ep->has_transfer` / `ep->actual_len`.**
 
-### Current Blocker: Auth 0xC1 + Controller Crash on Status Query
+### Auth Passthrough: COMPLETE
 
-The full auth relay pipeline works end-to-end. IDENTIFY handshake completes
-with proper chunked ACK format. GP2040-CE 4-step init sequence sends correctly.
-Both Xbox Wireless (045E:0B12) and PowerA (20D6:205B) controllers accept init.
+The full Xbox authentication handshake completes successfully. The Xbox Wireless
+Controller (045E:0B12) auth chip produces valid crypto responses that Xbox accepts.
 
-But BOTH controllers return `0xC1` ("auth waiting/not available") to 58-byte
-auth challenges, and **crash/disconnect on the 2-byte auth status query**.
+Auth sequence (4 rounds, all working):
+1. Xbox sends 58-byte challenge → controller responds 0xC1 ("processing")
+2. We relay 0xC1 to Xbox with INTERNAL flag (0x20) — CRITICAL
+3. Xbox sends 14-byte follow-up (`00 42 00 02 00 54...`)
+4. Controller responds with 58-byte chunked crypto signature
+5. Xbox sends 2-byte status check (`01 01`)
+6. Repeat 4 rounds, Xbox transitions to CONFIG (0x07) — auth passed
 
-Pattern (repeats 4x until Xbox gives up):
-1. Xbox sends 58-byte auth challenge (seq N) → forwarded → 0xC1 response
-2. Xbox sends 2-byte auth status query (seq N+1, payload `01 01`) → forwarded
-3. Controller USB-disconnects immediately after receiving the 2-byte query
-4. Controller remounts, re-initializes, Xbox retries
+Key discoveries:
+- Auth responses to Xbox MUST have GIP INTERNAL flag (0x20) or Xbox ignores them
+- The 0xC1 response is NOT an error — it's a valid "processing" status
+- The 14-byte follow-up (not the 2-byte query) triggers the real crypto computation
+- Only set state.authenticated on real crypto responses (>6 bytes)
 
-Status:
-1. ~~Receive ANNOUNCE from controller~~ ✅ DONE
-2. ~~IDENTIFY handshake with chunked ACK~~ ✅ DONE (proper Xbox ACK format)
-3. ~~GP2040-CE 4-step init (power config + ON + LED + rumble)~~ ✅ DONE
-4. ~~Forward Xbox's auth challenges to controller~~ ✅ DONE
-5. ~~Receive auth responses from controller~~ ✅ DONE (0xC1 = waiting)
-6. ~~Relay auth responses back to Xbox~~ ✅ DONE
-7. Fix 2-byte auth status query crash ← **NEXT BLOCKER**
-8. Get real auth crypto data (not 0xC1) from controller
+Status — all complete:
+1. ~~Receive ANNOUNCE from controller~~ ✅
+2. ~~IDENTIFY handshake with chunked ACK~~ ✅
+3. ~~GP2040-CE 4-step init (power config + ON + LED + rumble)~~ ✅
+4. ~~Forward auth challenges Xbox → controller~~ ✅
+5. ~~Relay 0xC1 status + 58-byte crypto responses controller → Xbox~~ ✅
+6. ~~Xbox accepts auth (4 rounds, transitions to CONFIG)~~ ✅
 
 ### Key Discovery: Chunked ACK Format (SOLVED)
 Xbox ACK payload (9 bytes) uses raw byte counts:
@@ -121,9 +123,9 @@ BOARD X (RP2040-Zero labeled "X") — GIP + PIO-USB BOTH WORKING
 AUTH CONTROLLER — Xbox Wireless Controller (VID=045E, PID=0B12)
 ├── Connected via USB-C to Board X USB-A Breakout #2
 ├── GIP interface: class=FF/47/D0, endpoints 0x02/0x82
-├── Sends GIP ANNOUNCE, IDENTIFY response
-├── LED illuminates on Power ON command
-└── Auth chip accessible via GIP cmd 0x06
+├── Full GIP handshake: ANNOUNCE → IDENTIFY (236 bytes) → Init → Auth
+├── LED illuminates, rumbles briefly on init
+└── Auth chip: produces valid 58-byte crypto signatures (4 rounds)
 
 BOARD S (3rd RP2040-Zero labeled "S") — DISCONNECTED
 
@@ -155,49 +157,45 @@ G29 WHEEL
 - ✅ ANNOUNCE handled once (no more Power ON loop)
 - ✅ GIP host state machine reaches READY state
 
-### Auth Relay Infrastructure
+### Auth Relay — COMPLETE
 - ✅ Auth challenges buffered from Xbox (Core 0) to shared buffer
 - ✅ Core 1 picks up challenges from shared buffer
 - ✅ Challenges forwarded to controller via PIO-USB OUT endpoint
-- ✅ Auth responses received from controller and relayed to Xbox
-- ✅ Challenge dedup by seq (Xbox retries ignored)
-- ✅ Response dedup by seq (controller retries relayed once)
-- ❌ Controller responds with 0xC1 "auth not available" (needs IDENTIFY handshake)
+- ✅ Controller produces real 58-byte crypto signatures (not 0xC1)
+- ✅ Auth responses relayed to Xbox with INTERNAL flag (critical!)
+- ✅ Challenge/response dedup by seq (no retry floods)
+- ✅ GIP host: ANNOUNCE → IDENTIFY (chunked ACK) → 4-step init → auth relay
+- ✅ Xbox completes 4 auth rounds and transitions to CONFIG — AUTH PASSED
 
 ### Infrastructure
 - ✅ DMA channel conflict FIXED (SPI ch 10/11, PIO-USB low channels)
 - ✅ Board X stable — no PANIC / watchdog reboot
 - ✅ Board X UART debug on GPIO 8 → Board G UART relay working
 - ✅ Duplicate endpoint bug fixed (only open first EP pair)
+- ✅ PIO-USB TX completion polling (bypasses broken TinyUSB callbacks)
 
 ## What Doesn't Work Yet
-- ❌ Auth completion — controller returns 0xC1 "not available" instead of crypto data
+- ❌ Wheel input not yet sent to Xbox (auth works, input pipeline next)
 - ❌ SPI telemetry from Board X shows stale data (SPI:ERR on Board G side)
 - ❌ UART sniffer relay (Board S → Board G) — paused
 - ❌ G29 mode switch (PID C294→C24F) — unchanged from prior session
 
 ## Next Steps (Priority Order)
 
-### 1. Fix GIP ACK Format for Controller
-The controller doesn't accept our ACKs, causing infinite retries. The ACK payload
-needs chunk progress bytes (received/remaining counts). Implement the Xbox ACK
-format documented above in the "Key Discovery" section. This will fix both
-IDENTIFY chunk ACKs and auth response ACKs.
+### 1. Send Wheel Input Reports to Xbox
+Auth is complete — Xbox is waiting for input. Need to:
+- Read G29 wheel data from Board G via SPI (currently SPI:ERR)
+- Map G29 inputs to Xbox wheel report format (cmd 0x20)
+- Send periodic input reports via `gip_send_input_report()`
+- Test that Xbox game receives steering/pedal/button data
 
-### 2. Complete IDENTIFY Handshake Before Auth
-The controller returns 0xC1 "auth not available" because it needs the IDENTIFY
-handshake completed first. Sequence should be:
-1. Receive ANNOUNCE → send IDENTIFY request (with INTERNAL flag)
-2. Receive IDENTIFY chunks → ACK each with proper chunk progress format
-3. Send Power ON after IDENTIFY completes
-4. Controller auth chip should now be available for challenges
+### 2. Fix SPI Telemetry (Board G → Board X)
+Board G shows SPI:ERR. The SPI master/slave link needs debugging.
+This is required for G29 input data to flow to Board X.
 
-### 3. ACK Xbox Auth Challenges
-Xbox sends auth with `needsAck=1` (flags=0x30). We should ACK these to prevent
-Xbox retries. Use same ACK format as controller-side.
-
-### 4. SPI Telemetry
-Board G shows SPI:ERR. The SPI master/slave link needs debugging separately.
+### 3. G29 Mode Switch (PID C294 → C24F)
+G29 currently works in legacy PS3 mode (8-bit steering).
+Native mode would give 16-bit steering + more features.
 
 ## Key Technical Decisions
 
@@ -239,13 +237,18 @@ FIRST occurrence of each endpoint address.
 | Keepalive | gip_protocol.c | 15s interval, after auth, payload {0x80,0,0,0} |
 | PIO-USB RX | auth_host.c | Direct PIO polling (bypass TinyUSB callbacks) |
 | Single EP open | auth_host.c | Only open first endpoint pair (prevent duplicates) |
-| ANNOUNCE once | auth_host.c | Only send Power ON on first ANNOUNCE |
-| Power ON flags | auth_host.c | INTERNAL flag (0x20) required — controller ignores without it |
-| TX completion | auth_host.c | Poll PIO-USB OUT endpoint directly (on_tx_complete callback broken) |
+| ANNOUNCE once | auth_host.c | Only process first ANNOUNCE, ignore subsequent |
+| GIP host handshake | auth_host.c | ANNOUNCE → IDENTIFY req → chunked ACK → 4-step init |
+| Chunked ACK format | auth_host.c | Xbox format: raw byte counts [rcv_lo,rcv_hi,0,0,rem_lo,rem_hi] |
+| XGIP unhash | auth_host.c | Reverse-compute raw total from hashed length for ACK remaining |
+| 4-step init | auth_host.c | Power config (15B) + Power ON + LED + Rumble (GP2040-CE proven) |
+| TX completion | auth_host.c | Poll PIO-USB OUT endpoint directly (on_tx_complete broken) |
 | ACK queue | auth_host.c | Deferred ACK queue for when tx_pending blocks immediate send |
 | Auth challenge dedup | gip_protocol.c | Track last seq, ignore Xbox retries |
 | Auth response dedup | auth_host.c | Track last seq, relay each response once |
-| Auth flags | auth_host.c | INTERNAL flag on auth challenge forwarding to controller |
+| Auth INTERNAL flag | gip_protocol.c | Auth responses to Xbox MUST have 0x20 flag or Xbox ignores |
+| Auth settle delay | auth_host.c | 500ms after init before forwarding challenges |
+| Auth state guard | gip_protocol.c | Only set authenticated=true on real crypto (>6 bytes) |
 
 ## Build Commands
 ```bash
