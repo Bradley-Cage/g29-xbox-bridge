@@ -21,6 +21,7 @@
 #include "spi_protocol.h"
 #include "spi_slave.h"
 #include "cdc_debug.h"
+#include "led_status.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -86,6 +87,9 @@ int main(void) {
     multicore_launch_core1(core1_entry);
 
     // Initialize subsystems
+    printf("[INIT] Status LED...\n");
+    // led_status_init();  // DISABLED: testing if PIO1 conflicts with USB host
+
     printf("[INIT] G29 USB Host...\n");
     g29_host_init();
 
@@ -168,11 +172,34 @@ int main(void) {
 
         // ── Step 7: Periodic status ──
         if (now_ms - last_status >= 5000) {
-            printf("[STATUS] G29:%s Steer=%04X Gas=%02X Brake=%02X\n",
+            printf("[STATUS] G29:%s SPI(rx=%lu err=%lu) Steer=%04X Gas=%02X Brake=%02X\n",
                    g29_is_connected() ? "OK" : "--",
+                   spi_slave_get_rx_count(),
+                   spi_slave_get_error_count(),
                    gs.steering, gs.gas, gs.brake);
+            // Show last received downstream frame info
+            if (spi_slave_get_rx_count() > 0) {
+                printf("  [SPI-DN] type=%02X seq=%d force=%d pwr=%d angle=%d\n",
+                       rx_frame.frame_type, rx_frame.sequence,
+                       rx_frame.af_wheel, rx_frame.power_level,
+                       rx_frame.angle_setting);
+            }
             last_status = now_ms;
         }
+
+        // ── Step 8: Update status LED (self-throttled to 250ms) ──
+        if (g29_is_connected()) {
+            // G29 connected — check SPI health
+            if (spi_slave_get_error_count() > spi_slave_get_rx_count() / 2 &&
+                spi_slave_get_rx_count() > 10) {
+                led_status_set(LED_STATUS_SPI_ERROR);  // Yellow: SPI unreliable
+            } else {
+                led_status_set(LED_STATUS_OK);         // Green: all good
+            }
+        } else {
+            led_status_set(LED_STATUS_WAITING);        // Blue: waiting for G29
+        }
+        led_status_update();
 
         // ── CDC debug flush ──
         cdc_debug_task();

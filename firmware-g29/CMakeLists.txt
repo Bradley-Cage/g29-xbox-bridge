@@ -29,9 +29,13 @@ add_executable(firmware_g29
     src/axis_math.c
     src/diagnostics.c
     src/cdc_debug.c
+    src/led_status.c
     # PIO USB HCD for TinyUSB integration
     ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/hcd_pio_usb.c
 )
+
+# WS2812 PIO program for onboard status LED (generates ws2812.pio.h)
+pico_generate_pio_header(firmware_g29 ${CMAKE_CURRENT_LIST_DIR}/src/ws2812.pio)
 
 target_include_directories(firmware_g29 PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/include

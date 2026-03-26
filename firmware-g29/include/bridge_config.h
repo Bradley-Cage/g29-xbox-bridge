@@ -24,9 +24,12 @@
 #define SPI_MISO_PIN        8   // Data to master (RP2040 #1)
 #define SPI_CS_PIN          9
 
-// UART0 — Debug output
-#define UART_TX_PIN         16  // GPIO 16 → USB-TTL adapter RX
-#define UART_BAUD           115200
+// WS2812 RGB LED (DWEII RP2040-Zero onboard NeoPixel)
+#define WS2812_LED_PIN      16  // GPIO 16 — WS2812 RGB LED
+
+// NOTE: GPIO 16 was previously assigned to UART_TX_PIN for debug output,
+// but UART stdio is disabled (we use CDC debug over native USB instead).
+// The DWEII RP2040-Zero has a WS2812 LED on GPIO 16, not a UART pin.
 
 // ─── Xbox GIP USB Interface Class ───
 // All Xbox controllers present this interface for GIP communication

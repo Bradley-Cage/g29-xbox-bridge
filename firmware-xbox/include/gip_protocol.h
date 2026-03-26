@@ -64,6 +64,8 @@ typedef struct {
     bool    metadata_sent;      // True after metadata exchange complete
     bool    authenticated;      // True after auth passes
     uint32_t last_keepalive_ms; // Timestamp of last keepalive
+    uint32_t mount_time_ms;     // When USB device was mounted
+    bool    announce_sent;      // True after ANNOUNCE sent (passive mode)
 } gip_state_t;
 
 // ─── Xbox VID/PID ───

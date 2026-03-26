@@ -80,7 +80,7 @@ static const uint8_t config_desc[] = {
 
     // Endpoint OUT: Xbox → controller (7 bytes)
     0x07, TUSB_DESC_ENDPOINT,
-    0x01,                           // bEndpointAddress = OUT 1
+    0x02,                           // bEndpointAddress = OUT 2
     TUSB_XFER_INTERRUPT,            // bmAttributes = interrupt
     U16_TO_U8S_LE(64),             // wMaxPacketSize = 64
     0x04,                           // bInterval = 4ms (250Hz)

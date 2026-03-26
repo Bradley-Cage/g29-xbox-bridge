@@ -6,6 +6,7 @@
  * completion before reading the received frame.
  *
  * SPI0 on RP2040 #1 (DWEII board — GPIO 16-25 have NO pads):
+ *   GPIO 0/1 = PIO-USB (PowerA auth) — reserved
  *   GPIO 2 = SCK                     — SPI0_SCK
  *   GPIO 3 = MOSI (data to slave)    — SPI0_TX
  *   GPIO 4 = MISO (data from slave)  — SPI0_RX

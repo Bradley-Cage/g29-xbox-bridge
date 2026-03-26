@@ -270,6 +270,21 @@ static void dispatch_gip_packet(const uint8_t *packet, uint16_t total_len) {
     }
 }
 
+// ─── TinyUSB Device Callbacks ───
+
+void tud_mount_cb(void) {
+    state.mount_time_ms = to_ms_since_boot(get_absolute_time());
+    state.announce_sent = false;
+    printf("[GIP] USB device mounted by host\n");
+}
+
+void tud_umount_cb(void) {
+    printf("[GIP] USB device unmounted\n");
+    state.device_started = false;
+    state.announce_sent = false;
+    state.mount_time_ms = 0;
+}
+
 // ─── Public API ───
 
 void gip_init(void) {
@@ -287,13 +302,14 @@ void gip_task(void) {
         }
     }
 
-    // Send Hello if not yet started
+    // Passive ANNOUNCE: wait for Xbox to initiate, send ONE fallback after 2s
     uint32_t now = to_ms_since_boot(get_absolute_time());
     if (!state.device_started && tud_vendor_mounted()) {
-        static uint32_t last_hello = 0;
-        if (now - last_hello >= 500) {
+        if (!state.announce_sent && state.mount_time_ms > 0 &&
+            (now - state.mount_time_ms >= 2000)) {
             handle_hello_request();
-            last_hello = now;
+            state.announce_sent = true;
+            printf("[GIP] Sent fallback ANNOUNCE (2s post-mount)\n");
         }
     }
 

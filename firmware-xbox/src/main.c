@@ -23,7 +23,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define WATCHDOG_TIMEOUT_MS 100
+#define WATCHDOG_TIMEOUT_MS 2000  // 2s during bring-up (tighten after stable)
 
 // External: SPI master DMA driver (spi_master.c)
 extern void spi_master_init(void);
@@ -61,8 +61,8 @@ static void core1_entry(void) {
 // ─── Core 0: Main ───
 
 int main(void) {
-    // 144MHz = 12x12MHz, required for PIO-USB timing
-    set_sys_clock_khz(144000, true);
+    // 120MHz = 10x12MHz, required for PIO-USB timing
+    set_sys_clock_khz(120000, true);
 
     stdio_init_all();
     sleep_ms(500);
@@ -71,9 +71,6 @@ int main(void) {
     printf("=== G29 Bridge — RP2040 #1 (Xbox + VM) ===\n");
     printf("Clock: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
     printf("Build: %s %s\n\n", __DATE__, __TIME__);
-
-    // Hardware watchdog
-    watchdog_enable(WATCHDOG_TIMEOUT_MS, true);
 
     // Initialize TinyUSB device (Xbox connection)
     tud_init(0);
@@ -89,7 +86,11 @@ int main(void) {
     // Launch Core 1 (PIO-USB host + Equation VM)
     printf("[MAIN] Launching Core 1 (PIO-USB host + VM)...\n");
     multicore_launch_core1(core1_entry);
-    sleep_ms(50);
+    sleep_ms(500);  // Give Core 1 time to init PIO-USB
+
+    // Enable watchdog AFTER Core 1 is running
+    watchdog_enable(WATCHDOG_TIMEOUT_MS, true);
+    printf("[MAIN] Watchdog enabled (%dms)\n", WATCHDOG_TIMEOUT_MS);
 
     printf("[MAIN] Entering main loop\n\n");
 
