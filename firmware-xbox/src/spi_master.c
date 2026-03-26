@@ -127,9 +127,29 @@ bool spi_master_finish_transfer(void) {
     if (spi_validate_frame((const uint8_t *)&rx_frame_dma)) {
         memcpy(&last_valid_rx, &rx_frame_dma, sizeof(rx_frame_dma));
         rx_valid = true;
+        // Debug: log first few successes
+        static uint32_t ok_count = 0;
+        ok_count++;
+        if (ok_count <= 3) {
+            uint8_t *p = (uint8_t *)&rx_frame_dma;
+            printf("[SPI-DBG] OK #%lu: %02X %02X %02X %02X %02X %02X %02X %02X "
+                   "steer=%04X g29=%d\n",
+                   (unsigned long)ok_count,
+                   p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
+                   rx_frame_dma.steering, rx_frame_dma.g29_status);
+        }
         return true;
     } else {
         rx_errors++;
+        // Debug: log first few CRC failures to see what we're receiving
+        if (rx_errors <= 5 || (rx_errors % 10000) == 0) {
+            uint8_t *p = (uint8_t *)&rx_frame_dma;
+            uint8_t expected_crc = spi_crc8(p, SPI_FRAME_SIZE - 1);
+            printf("[SPI-DBG] CRC fail #%lu: got=0x%02X exp=0x%02X | "
+                   "%02X %02X %02X %02X %02X %02X %02X %02X\n",
+                   (unsigned long)rx_errors, p[SPI_CRC_OFFSET], expected_crc,
+                   p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+        }
         return false;
     }
 }

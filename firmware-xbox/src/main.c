@@ -31,6 +31,8 @@ extern void spi_master_start_transfer(const spi_downstream_frame_t *frame);
 extern bool spi_master_transfer_done(void);
 extern bool spi_master_finish_transfer(void);
 extern bool spi_master_get_rx_frame(spi_upstream_frame_t *out);
+extern uint32_t spi_master_get_rx_count(void);
+extern uint32_t spi_master_get_error_count(void);
 
 // ─── Core 1: PIO-USB Host + Cooperative Equation VM ───
 
@@ -220,9 +222,12 @@ int main(void) {
 
         // ── Periodic status ──
         if (now_ms - last_status_ms >= 5000) {
-            printf("[STATUS] Xbox:%s SPI:%s Auth:%s(%s) Steer=%04X Gas=%02X Brake=%02X\n",
+            printf("[STATUS] Xbox:%s SPI(rx=%lu err=%lu pend=%d) Auth:%s(%s) "
+                   "Steer=%04X Gas=%02X Brake=%02X\n",
                    tud_mounted() ? "OK" : "--",
-                   rx_frame.g29_status == 1 ? "OK" : "ERR",
+                   (unsigned long)spi_master_get_rx_count(),
+                   (unsigned long)spi_master_get_error_count(),
+                   spi_pending ? 1 : 0,
                    gip_is_authenticated() ? "OK" : "--",
                    auth_host_connected() ? "conn" : "wait",
                    rx_frame.steering, rx_frame.gas, rx_frame.brake);

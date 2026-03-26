@@ -18,10 +18,11 @@
 // GPIO 2/3 on this board are now free.
 
 // SPI1 — Communication to RP2040 #1 (slave mode)
+// RP2040 hardware: GPIO 8 = SPI1_RX, GPIO 11 = SPI1_TX (fixed in silicon)
 #define SPI_PORT            spi1
 #define SPI_SCK_PIN         10
-#define SPI_MOSI_PIN        11  // Data from master (RP2040 #1)
-#define SPI_MISO_PIN        8   // Data to master (RP2040 #1)
+#define SPI_MOSI_PIN        8   // SPI1_RX: Data from master (RP2040 #1)
+#define SPI_MISO_PIN        11  // SPI1_TX: Data to master (RP2040 #1)
 #define SPI_CS_PIN          9
 
 // WS2812 RGB LED (DWEII RP2040-Zero onboard NeoPixel)
