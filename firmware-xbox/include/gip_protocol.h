@@ -56,6 +56,27 @@ typedef struct __attribute__((packed)) {
     uint8_t length;         // Payload length (simple) or LEB128 first byte
 } gip_header_t;
 
+// ─── XGIP Chunked Transfer ───
+
+#define GIP_MAX_CHUNK_DATA   0x3A  // 58 bytes max payload per chunk
+#define GIP_CHUNK_INTERVAL_MS  35  // Minimum ms between chunk sends
+#define GIP_ACK_TIMEOUT_MS   2000  // Max wait for ACK before retrying
+
+typedef struct {
+    bool     active;            // Chunked transfer in progress
+    uint8_t  command;           // GIP command for this transfer
+    uint8_t  sequence;          // Base sequence from the request
+    const uint8_t *data;        // Pointer to full data blob
+    uint16_t data_len;          // Total data length
+    uint16_t total_sent;        // Bytes sent so far
+    uint16_t total_chunk_len;   // XGIP "hashed" total length
+    uint16_t total_chunk_sent;  // XGIP "hashed" running counter
+    uint8_t  chunks_sent;       // Number of chunks sent
+    uint32_t last_chunk_ms;     // Timestamp of last chunk send
+    bool     waiting_ack;       // Blocked waiting for ACK
+    uint32_t ack_wait_start;    // When we started waiting for ACK
+} gip_chunked_tx_t;
+
 // ─── GIP Protocol State ───
 
 typedef struct {
@@ -65,7 +86,8 @@ typedef struct {
     bool    authenticated;      // True after auth passes
     uint32_t last_keepalive_ms; // Timestamp of last keepalive
     uint32_t mount_time_ms;     // When USB device was mounted
-    bool    announce_sent;      // True after ANNOUNCE sent (passive mode)
+    uint32_t last_announce_ms;  // Timestamp of last ANNOUNCE sent
+    uint16_t announce_count;    // Number of ANNOUNCEs sent (debug)
 } gip_state_t;
 
 // ─── Xbox VID/PID ───
@@ -77,7 +99,7 @@ typedef struct {
 
 // ─── Keepalive ───
 
-#define GIP_KEEPALIVE_INTERVAL_MS   1500
+#define GIP_KEEPALIVE_INTERVAL_MS   15000  // 15s, matches GP2040-CE
 
 // ─── Public API ───
 
@@ -97,5 +119,15 @@ void gip_submit_auth_response(const uint8_t *response, uint16_t len);
 
 // Check if authenticated
 bool gip_is_authenticated(void);
+
+// Debug: packed GIP state for SPI telemetry (4 bytes)
+typedef struct {
+    uint8_t flags;          // bit0=mounted, bit1=metadata_sent, bit2=device_started, bit3=authenticated
+    uint8_t announce_count; // Number of ANNOUNCEs sent (wraps at 255)
+    uint8_t auth_host;      // bit0=PowerA connected
+    uint8_t last_rx_cmd;    // Last GIP command received from Xbox
+} gip_debug_state_t;
+
+void gip_get_debug_state(gip_debug_state_t *out);
 
 #endif // GIP_PROTOCOL_H

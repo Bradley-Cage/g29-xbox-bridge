@@ -3,10 +3,11 @@
  *
  * Based on MS-GIPUSB specification and GP2040-CE proven implementation.
  * Key requirements:
- *   - Device class/subclass/protocol: 0xFF/0x47/0xD0 (GIP)
+ *   - Device class/subclass/protocol: 0xFF/0xFF/0xFF (vendor-specific)
+ *   - Interface subclass/protocol: 0x47/0xD0 (GIP)
  *   - MS OS String Descriptor at index 0xEE with "XGIP10" compatible ID
  *   - STALL on device_qualifier requests (full-speed only)
- *   - Interrupt endpoints IN 0x81 + OUT 0x02, 64 bytes, 4ms interval
+ *   - Interrupt endpoints IN 0x81 + OUT 0x02, 64 bytes, 1ms interval
  */
 
 #include "tusb.h"
@@ -23,7 +24,7 @@
 #define GIP_PID  0x02A4  // GP2040-CE compatible
 
 // ─── MS OS Descriptor Constants ───
-#define MS_OS_VENDOR_CODE  0x90
+#define MS_OS_VENDOR_CODE  0x20  // GP2040-CE uses 0x20, must match string desc at 0xEE
 
 // ─── Device Descriptor ───
 
@@ -32,8 +33,8 @@ static const tusb_desc_device_t device_desc = {
     .bDescriptorType    = TUSB_DESC_DEVICE,
     .bcdUSB             = 0x0200,       // USB 2.0
     .bDeviceClass       = 0xFF,         // Vendor Specific
-    .bDeviceSubClass    = 0x47,         // GIP
-    .bDeviceProtocol    = 0xD0,         // GIP
+    .bDeviceSubClass    = 0xFF,         // Vendor Specific (GIP subclass goes on interface only)
+    .bDeviceProtocol    = 0xFF,         // Vendor Specific (GIP protocol goes on interface only)
     .bMaxPacketSize0    = 64,
     .idVendor           = GIP_VID,
     .idProduct          = GIP_PID,
@@ -58,7 +59,7 @@ static const uint8_t config_desc[] = {
     0x01,                           // bNumInterfaces = 1 (no audio)
     0x01,                           // bConfigurationValue = 1
     0x00,                           // iConfiguration = 0
-    0x80,                           // bmAttributes: bus-powered (no remote wakeup — not implemented)
+    0xA0,                           // bmAttributes: bus-powered + remote wakeup (matches GP2040-CE)
     0xFA,                           // bMaxPower = 500mA
 
     // Interface 0: GIP Data (9 bytes)
@@ -76,14 +77,14 @@ static const uint8_t config_desc[] = {
     0x81,                           // bEndpointAddress = IN 1
     TUSB_XFER_INTERRUPT,            // bmAttributes = interrupt
     U16_TO_U8S_LE(64),             // wMaxPacketSize = 64
-    0x04,                           // bInterval = 4ms (250Hz)
+    0x01,                           // bInterval = 1ms (1000Hz, matches GP2040-CE)
 
     // Endpoint OUT: Xbox → controller (7 bytes)
     0x07, TUSB_DESC_ENDPOINT,
     0x02,                           // bEndpointAddress = OUT 2
     TUSB_XFER_INTERRUPT,            // bmAttributes = interrupt
     U16_TO_U8S_LE(64),             // wMaxPacketSize = 64
-    0x04,                           // bInterval = 4ms (250Hz)
+    0x01,                           // bInterval = 1ms (1000Hz, matches GP2040-CE)
 };
 
 const uint8_t *tud_descriptor_configuration_cb(uint8_t index) {
@@ -141,11 +142,17 @@ static const uint8_t ms_os_string_desc[] = {
     0x00                            // bPad
 };
 
+// Xbox Security Method string — GP2040-CE serves this at index 4.
+// Xbox queries this during enumeration to determine auth protocol.
+static const char security_method_str[] =
+    "Xbox Security Method 3, Version 1.00, \xc2\xa9 2005 Microsoft Corporation. All rights reserved.";
+
 static const char *string_descs[] = {
     [0] = (const char[]){0x09, 0x04},   // English US LANGID
     [1] = "Open Stick Community",
     [2] = "G29 Xbox Bridge",
     [3] = NULL,  // Serial — generated at runtime
+    [4] = security_method_str,
 };
 
 const uint16_t *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
@@ -194,7 +201,7 @@ const uint16_t *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
 }
 
 // ─── Vendor Control Request Handler ───
-// Handles MS OS Descriptor requests (vendor code 0x90)
+// Handles MS OS Descriptor requests (vendor code 0x20)
 // and STALL on device_qualifier (full-speed only device)
 
 bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
