@@ -18,7 +18,8 @@
 // GPIO 2/3 on this board are now free.
 
 // SPI1 — Communication to RP2040 #1 (slave mode)
-// RP2040 hardware: GPIO 8 = SPI1_RX, GPIO 11 = SPI1_TX (fixed in silicon)
+// MUST use Mode 3 (CPOL=1, CPHA=1) — PL022 slave freezes shift register
+// with CPHA=0, causing multi-byte transfers to repeat the first byte.
 #define SPI_PORT            spi1
 #define SPI_SCK_PIN         10
 #define SPI_MOSI_PIN        8   // SPI1_RX: Data from master (RP2040 #1)

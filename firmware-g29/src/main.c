@@ -211,33 +211,13 @@ int main(void) {
             last_ffb_tick = now_ms;
         }
 
-        // ── Step 7: Periodic status ──
-        if (now_ms - last_status >= 5000) {
-            printf("[STATUS] G29:%s SPI(rx=%lu err=%lu) UART=%lu Steer=%04X Gas=%02X Brake=%02X\n",
+        // ── Step 7: Periodic status (every 30s — quiet mode) ──
+        if (now_ms - last_status >= 30000) {
+            printf("[STATUS] G29:%s SPI(rx=%lu err=%lu) Steer=%04X Gas=%02X Brake=%02X\n",
                    g29_is_connected() ? "OK" : "--",
                    spi_slave_get_rx_count(),
                    spi_slave_get_error_count(),
-                   (unsigned long)uart_total_bytes,
                    gs.steering, gs.gas, gs.brake);
-            // Show last received downstream frame info + GIP debug state
-            if (spi_slave_get_rx_count() > 0) {
-                printf("  [SPI-DN] type=%02X seq=%d force=%d pwr=%d angle=%d\n",
-                       rx_frame.frame_type, rx_frame.sequence,
-                       rx_frame.af_wheel, rx_frame.power_level,
-                       rx_frame.angle_setting);
-                // GIP debug state from Board X (reserved[15..18])
-                uint8_t gip_flags = rx_frame.reserved[15];
-                uint8_t ann_count = rx_frame.reserved[16];
-                uint8_t auth_host = rx_frame.reserved[17];
-                uint8_t last_cmd  = rx_frame.reserved[18];
-                printf("  [GIP] Xbox:%s Meta:%s Started:%s Auth:%s PowerA:%s Ann=%d LastCmd=%02X\n",
-                       (gip_flags & 0x01) ? "MOUNT" : "---",
-                       (gip_flags & 0x02) ? "SENT" : "---",
-                       (gip_flags & 0x04) ? "ON" : "---",
-                       (gip_flags & 0x08) ? "OK" : "---",
-                       (auth_host & 0x01) ? "CONN" : "---",
-                       ann_count, last_cmd);
-            }
             last_status = now_ms;
         }
 

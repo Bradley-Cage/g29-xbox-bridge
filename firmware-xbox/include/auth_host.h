@@ -55,6 +55,9 @@ void auth_host_task(void);
 /** Returns true if PowerA is GIP-ready for auth relay. */
 bool auth_host_connected(void);
 
+/** Returns raw GIP host state for diagnostics (0=IDLE..5=READY). */
+uint8_t auth_host_get_state(void);
+
 /**
  * Queue an auth challenge for the PowerA controller.
  * Called from Core 0 (gip_protocol.c context).

@@ -34,7 +34,7 @@ typedef enum {
 
 // ─── Device State ───
 
-static bool auth_connected = false;
+static volatile bool auth_connected = false;
 static uint8_t auth_dev_addr = 0;
 
 // Endpoint info
@@ -43,7 +43,7 @@ static uint8_t ep_out_addr = 0;
 static bool endpoints_open = false;
 
 // GIP host state
-static gip_host_state_t gip_state = GIP_HOST_IDLE;
+static volatile gip_host_state_t gip_state = GIP_HOST_IDLE;
 static uint8_t gip_seq_counters[256];
 static uint32_t auth_mount_time = 0;
 static bool auth_relay_started = false;
@@ -803,7 +803,7 @@ void auth_host_task(void) {
     static uint32_t task_count = 0;
     task_count++;
     uint32_t now = to_ms_since_boot(get_absolute_time());
-    if (now - last_heartbeat >= 10000) {  // Every 10s
+    if (now - last_heartbeat >= 60000) {  // Every 60s (quiet mode)
         printf("[AUTH-HB] Core1 alive: %lu tasks, connected=%d, endpoints=%d\n",
                (unsigned long)task_count, auth_connected, endpoints_open);
         // Dump PIO-USB root port and endpoint pool state
@@ -861,10 +861,13 @@ void auth_host_task(void) {
         if (ep && !ep->has_transfer && ep->actual_len > 0) {
             // Transfer completed with data!
             uint16_t len = ep->actual_len;
-            printf("[AUTH-RX] %d bytes:", len);
-            for (uint16_t i = 0; i < len && i < 16; i++)
-                printf(" %02X", gip_rx_buf[i]);
-            printf("\n");
+            // Quiet: suppress periodic packets (0x02=ANNOUNCE, 0x03=STATUS, 0x20=INPUT)
+            if (len >= 1 && gip_rx_buf[0] != 0x03 && gip_rx_buf[0] != 0x02 && gip_rx_buf[0] != 0x20) {
+                printf("[AUTH-RX] %d bytes:", len);
+                for (uint16_t i = 0; i < len && i < 16; i++)
+                    printf(" %02X", gip_rx_buf[i]);
+                printf("\n");
+            }
             process_gip_packet(gip_rx_buf, len);
             // Resubmit
             start_rx();
@@ -964,6 +967,10 @@ void auth_host_task(void) {
 
 bool auth_host_connected(void) {
     return auth_connected && gip_state == GIP_HOST_READY;
+}
+
+uint8_t auth_host_get_state(void) {
+    return (uint8_t)gip_state;
 }
 
 // Called from Core 0 — queue challenge for Core 1

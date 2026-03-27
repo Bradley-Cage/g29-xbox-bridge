@@ -17,11 +17,11 @@
 #include <stdio.h>
 
 // ─── VID/PID ───
-// GP2040-CE uses PDP VID 0x0E6F / PID 0x02A4 — proven on Xbox Series X
-// with auth passthrough. Using Microsoft VID 0x045E may cause issues
-// without a matching auth certificate.
-#define GIP_VID  0x0E6F  // PDP (Performance Designed Products)
-#define GIP_PID  0x02A4  // GP2040-CE compatible
+// DEVELOPMENT throwaway VID/PID — resets Xbox fingerprint to avoid
+// error 0x82d60003 accumulation during bring-up. Change back to production
+// values (e.g., PDP 0x0E6F/0x02A4) before any user-facing release.
+#define GIP_VID  0x1209  // pid.codes open-source VID (safe for development)
+#define GIP_PID  0x029B  // Throwaway dev PID — no production meaning
 
 // ─── MS OS Descriptor Constants ───
 #define MS_OS_VENDOR_CODE  0x20  // GP2040-CE uses 0x20, must match string desc at 0xEE

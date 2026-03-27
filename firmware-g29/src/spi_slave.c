@@ -9,11 +9,11 @@
  * Double-buffered: Core 0 fills the next TX buffer while DMA
  * sends the current one.
  *
- * SPI1 on RP2040 #2:
- *   GPIO 8  = MISO (slave output to master)
- *   GPIO 9  = CS   (chip select from master)
- *   GPIO 10 = SCK  (clock from master)
- *   GPIO 11 = MOSI (slave input from master)
+ * SPI1 on RP2040 #2 (pin mapping from bridge_config.h):
+ *   GPIO 12 = SPI1_RX (MOSI — data from master)
+ *   GPIO 9  = SPI1_CSn (chip select from master)
+ *   GPIO 10 = SPI1_SCK (clock from master)
+ *   GPIO 11 = SPI1_TX (MISO — data to master)
  */
 
 #include "spi_protocol.h"
@@ -40,9 +40,11 @@ static volatile bool rx_valid = false;
 static volatile uint32_t rx_count = 0;
 static volatile uint32_t rx_errors = 0;
 
-// DMA channels
+// DMA channels and saved configs (re-applied on every restart)
 static int dma_tx_chan = -1;
 static int dma_rx_chan = -1;
+static dma_channel_config saved_tx_cfg;
+static dma_channel_config saved_rx_cfg;
 
 static bool initialized = false;
 
@@ -50,13 +52,20 @@ void spi_slave_init(void) {
     // Initialize SPI1 in slave mode
     spi_init(SPI_PORT, SPI_CLOCK_HZ);
     spi_set_slave(SPI_PORT, true);
-    spi_set_format(SPI_PORT, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+    // Mode 3 (CPOL=1, CPHA=1) required — PL022 slave with CPHA=0 freezes
+    // the shift register after the first byte when CS stays low.
+    spi_set_format(SPI_PORT, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
 
     // Configure GPIO
-    gpio_set_function(SPI_MISO_PIN, GPIO_FUNC_SPI);  // MISO (output)
-    gpio_set_function(SPI_CS_PIN,   GPIO_FUNC_SPI);  // CS
-    gpio_set_function(SPI_SCK_PIN,  GPIO_FUNC_SPI);  // SCK
-    gpio_set_function(SPI_MOSI_PIN, GPIO_FUNC_SPI);  // MOSI (input)
+    gpio_set_function(SPI_MISO_PIN, GPIO_FUNC_SPI);  // SPI1_TX (slave output)
+    gpio_set_function(SPI_CS_PIN,   GPIO_FUNC_SPI);  // SPI1_CSn
+    gpio_set_function(SPI_SCK_PIN,  GPIO_FUNC_SPI);  // SPI1_SCK
+    gpio_set_function(SPI_MOSI_PIN, GPIO_FUNC_SPI);  // SPI1_RX (slave input)
+
+    // Flush RX FIFO — master may have clocked bytes during boot
+    while (spi_is_readable(SPI_PORT)) {
+        (void)spi_get_hw(SPI_PORT)->dr;
+    }
 
     // Clear buffers
     memset(tx_buf, 0, sizeof(tx_buf));
@@ -67,43 +76,40 @@ void spi_slave_init(void) {
     dma_tx_chan = dma_claim_unused_channel(true);
     dma_rx_chan = dma_claim_unused_channel(true);
 
-    // Configure TX DMA (slave → master via MISO)
-    dma_channel_config tx_cfg = dma_channel_get_default_config(dma_tx_chan);
-    channel_config_set_transfer_data_size(&tx_cfg, DMA_SIZE_8);
-    channel_config_set_dreq(&tx_cfg, spi_get_dreq(SPI_PORT, true));  // TX DREQ
-    channel_config_set_read_increment(&tx_cfg, true);
-    channel_config_set_write_increment(&tx_cfg, false);
+    // Configure TX DMA (slave → master via SPI1_TX/GPIO 11)
+    saved_tx_cfg = dma_channel_get_default_config(dma_tx_chan);
+    channel_config_set_transfer_data_size(&saved_tx_cfg, DMA_SIZE_8);
+    channel_config_set_dreq(&saved_tx_cfg, spi_get_dreq(SPI_PORT, true));
+    channel_config_set_read_increment(&saved_tx_cfg, true);
+    channel_config_set_write_increment(&saved_tx_cfg, false);
 
-    // Configure RX DMA (master → slave via MOSI)
-    dma_channel_config rx_cfg = dma_channel_get_default_config(dma_rx_chan);
-    channel_config_set_transfer_data_size(&rx_cfg, DMA_SIZE_8);
-    channel_config_set_dreq(&rx_cfg, spi_get_dreq(SPI_PORT, false)); // RX DREQ
-    channel_config_set_read_increment(&rx_cfg, false);
-    channel_config_set_write_increment(&rx_cfg, true);
+    // Configure RX DMA (master → slave via SPI1_RX/GPIO 12)
+    saved_rx_cfg = dma_channel_get_default_config(dma_rx_chan);
+    channel_config_set_transfer_data_size(&saved_rx_cfg, DMA_SIZE_8);
+    channel_config_set_dreq(&saved_rx_cfg, spi_get_dreq(SPI_PORT, false));
+    channel_config_set_read_increment(&saved_rx_cfg, false);
+    channel_config_set_write_increment(&saved_rx_cfg, true);
 
     // Start first DMA transfer
-    dma_channel_configure(dma_tx_chan, &tx_cfg,
-                          &spi_get_hw(SPI_PORT)->dr,    // Write to SPI TX FIFO
-                          &tx_buf[0],                    // Read from TX buffer 0
-                          SPI_FRAME_SIZE,                // Transfer size
-                          false);                        // Don't start yet
+    dma_channel_configure(dma_tx_chan, &saved_tx_cfg,
+                          &spi_get_hw(SPI_PORT)->dr,
+                          &tx_buf[0],
+                          SPI_FRAME_SIZE, false);
 
-    dma_channel_configure(dma_rx_chan, &rx_cfg,
-                          &rx_buf,                       // Write to RX buffer
-                          &spi_get_hw(SPI_PORT)->dr,    // Read from SPI RX FIFO
-                          SPI_FRAME_SIZE,                // Transfer size
-                          false);                        // Don't start yet
+    dma_channel_configure(dma_rx_chan, &saved_rx_cfg,
+                          &rx_buf,
+                          &spi_get_hw(SPI_PORT)->dr,
+                          SPI_FRAME_SIZE, false);
 
-    // Start both channels — they'll wait for the master to clock data
     dma_start_channel_mask((1u << dma_tx_chan) | (1u << dma_rx_chan));
 
     initialized = true;
-    printf("[SPI] Slave initialized on SPI1, DMA channels %d/%d\n",
+    printf("[SPI] Slave on SPI1: MOSI=GPIO%d MISO=GPIO%d SCK=GPIO%d CS=GPIO%d DMA=%d/%d\n",
+           SPI_MOSI_PIN, SPI_MISO_PIN, SPI_SCK_PIN, SPI_CS_PIN,
            dma_tx_chan, dma_rx_chan);
 }
 
 void spi_slave_set_tx_frame(const spi_upstream_frame_t *frame) {
-    // Write to the inactive buffer
     uint8_t inactive = 1 - tx_active;
     memcpy(&tx_buf[inactive], frame, sizeof(spi_upstream_frame_t));
 }
@@ -111,9 +117,8 @@ void spi_slave_set_tx_frame(const spi_upstream_frame_t *frame) {
 bool spi_slave_task(void) {
     if (!initialized) return false;
 
-    // Check if DMA transfer completed (master clocked a full frame)
     if (dma_channel_is_busy(dma_rx_chan)) {
-        return false;  // Still in progress
+        return false;
     }
 
     // Transfer complete — validate received frame
@@ -121,18 +126,46 @@ bool spi_slave_task(void) {
     if (spi_validate_frame((const uint8_t *)&rx_buf)) {
         memcpy((void *)&last_valid_rx, &rx_buf, sizeof(rx_buf));
         rx_valid = true;
+        // Log first few valid frames
+        static uint32_t ok_log = 0;
+        if (ok_log < 3) {
+            ok_log++;
+            uint8_t *p = (uint8_t *)&rx_buf;
+            printf("[SPI-RX] OK #%lu: %02X %02X %02X %02X %02X %02X %02X %02X\n",
+                   (unsigned long)ok_log,
+                   p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+        }
     } else {
         rx_errors++;
+        if (rx_errors <= 5) {
+            uint8_t *p = (uint8_t *)&rx_buf;
+            uint8_t expected_crc = spi_crc8(p, SPI_FRAME_SIZE - 1);
+            printf("[SPI-RX] CRC fail #%lu: got=0x%02X exp=0x%02X | "
+                   "%02X %02X %02X %02X %02X %02X %02X %02X\n",
+                   (unsigned long)rx_errors, p[SPI_CRC_OFFSET], expected_crc,
+                   p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+        }
     }
 
     // Swap TX buffer
     tx_active = 1 - tx_active;
 
-    // Restart DMA for next frame
-    dma_channel_set_read_addr(dma_tx_chan, &tx_buf[tx_active], false);
-    dma_channel_set_write_addr(dma_rx_chan, &rx_buf, false);
-    dma_channel_set_trans_count(dma_tx_chan, SPI_FRAME_SIZE, false);
-    dma_channel_set_trans_count(dma_rx_chan, SPI_FRAME_SIZE, false);
+    // Flush stale bytes between DMA completion and restart
+    while (spi_is_readable(SPI_PORT)) {
+        (void)spi_get_hw(SPI_PORT)->dr;
+    }
+
+    // Restart DMA with full configure (re-applies saved config each time)
+    dma_channel_configure(dma_tx_chan, &saved_tx_cfg,
+                          &spi_get_hw(SPI_PORT)->dr,
+                          &tx_buf[tx_active],
+                          SPI_FRAME_SIZE, false);
+
+    dma_channel_configure(dma_rx_chan, &saved_rx_cfg,
+                          &rx_buf,
+                          &spi_get_hw(SPI_PORT)->dr,
+                          SPI_FRAME_SIZE, false);
+
     dma_start_channel_mask((1u << dma_tx_chan) | (1u << dma_rx_chan));
 
     return rx_valid;

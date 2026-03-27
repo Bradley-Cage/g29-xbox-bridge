@@ -29,7 +29,7 @@
 #define SPI_CRC_OFFSET      31
 
 // SPI bus parameters
-#define SPI_CLOCK_HZ        1000000     // 1 MHz (reduced from 10MHz for jumper wire reliability)
+#define SPI_CLOCK_HZ        1000000     // 1 MHz
 #define SPI_FRAME_RATE_HZ   1000        // 1 kHz
 #define SPI_TIMEOUT_MS      50          // Error state if no valid frame in 50ms
 #define SPI_AUTH_SEQ_TIMEOUT_MS  500    // Multi-frame auth sequence timeout

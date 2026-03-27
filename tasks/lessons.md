@@ -79,6 +79,30 @@
 
 ---
 
+### End-User Robustness: Xbox Error 0x82d60003 Risk
+
+**Risk summary:** Xbox enforces accessory authentication via a two-strike policy. A device that fails GIP auth receives error 0x82d60002 (2-week grace period, device still functions). After 2 weeks, 0x82d60003 is issued and the device is **permanently blocked** — it will not enumerate on that console again. For a developer, this is recoverable by reflashing with a different VID/PID. For an end user, it is a dead device with no recourse.
+
+**Root cause of risk for this project:** The Xbox issues the GIP auth challenge (command 0x06) very early in enumeration. If Board X presents itself as a USB device before the auth relay path is ready — auth controller not yet connected, SPI not yet synced, PIO-USB host not yet enumerated the Xbox Wireless controller — the Xbox receives no valid auth response, marks the device unauthenticated, and starts the 2-week clock. An end user powering on their setup each session will trigger this repeatedly, accelerating toward permanent block without any visible indication something is wrong.
+
+35. **[DONE] Hold USB enumeration until auth path is confirmed ready** — Implemented: `tud_init(0)` then immediate `tud_disconnect()`. Polling loop waits up to 15s for `auth_host_connected()` (requires GIP_HOST_READY state). Only then calls `tud_connect()` to enable D+. Gate typically passes in ~609ms. This prevents Xbox from ever seeing the device before auth is ready.
+
+36. **[DONE] Detect auth controller absence at startup and refuse Xbox connection** — Implemented: If auth controller not detected within 15s, device halts permanently with D+ low. Logs error, never enables Xbox USB.
+
+37. **[DONE] Handle auth controller mid-session disconnect without re-triggering auth failure** — Implemented: Main loop checks `auth_host_connected()` with 3-second debounce. PowerA transiently disconnects after Xbox CONFIG state (~1-1.5s) and during GIP re-handshake (~100ms) — debounce handles both. If auth stays gone >3s, calls `tud_disconnect()`.
+
+38. **[DONE] Auth relay timeout: disconnect rather than timeout silently** — Implemented: 5s auth relay timeout now calls `tud_disconnect()` instead of silently dropping the challenge. Cross-core data race also fixed: `auth_connected` and `gip_state` made `volatile` in auth_host.c.
+
+**Developer escape hatch (not applicable to end users):** VID/PID is defined in `firmware-xbox/src/usb_descriptors.c` lines 23–24. Serial number is derived from RP2040 unique board ID (hardware-burned, unique per board). Changing either resets the Xbox fingerprint. Spare RP2040-Zero boards achieve the same by hardware swap. End users have neither option — items 35–38 are now all implemented. Dev VID/PID changed to 0x1209/0x029B to reset Xbox fingerprint during development.
+
+---
+
+### SPI Hardware
+
+39. **[CRITICAL] RP2040 PL022 SPI slave REQUIRES CPHA=1 for multi-byte transfers** — The PL022's slave mode with SPH=0 (CPHA=0) freezes the shift register after the first byte when CS stays asserted. Only SPI Mode 1 or Mode 3 (CPHA=1) support multi-byte slave reception. This is documented in the PL022 datasheet but not in the Pico SDK docs. Mode 3 has a known first-byte corruption issue (SCK idles HIGH, glitches on CS assert). Long-term fix: PIO-based SPI slave (reference: MichaelBell/spi-ram-emu). References: pico-sdk issues #941, #1116; hackaday.io/project/173823.
+
+---
+
 ### Resolved / Historical Items
 
 *These items were issues during development but have been addressed. Kept for reference.*

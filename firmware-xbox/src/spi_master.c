@@ -46,7 +46,9 @@ static uint32_t rx_errors = 0;
 void spi_master_init(void) {
     // Init SPI0 at 10MHz
     spi_init(SPI_MASTER_PORT, SPI_CLOCK_HZ);
-    spi_set_format(SPI_MASTER_PORT, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+    // Mode 3 (CPOL=1, CPHA=1) — must match slave. PL022 slave requires
+    // CPHA=1 for multi-byte transfers (CPHA=0 freezes shift register).
+    spi_set_format(SPI_MASTER_PORT, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
 
     // GPIO
     gpio_set_function(SPI_MASTER_SCK,  GPIO_FUNC_SPI);
@@ -57,6 +59,11 @@ void spi_master_init(void) {
     gpio_init(SPI_MASTER_CS);
     gpio_set_dir(SPI_MASTER_CS, GPIO_OUT);
     gpio_put(SPI_MASTER_CS, 1);  // Inactive
+
+    // Flush RX FIFO — clear any stale bytes from init/boot sequence
+    while (spi_is_readable(SPI_MASTER_PORT)) {
+        (void)spi_get_hw(SPI_MASTER_PORT)->dr;
+    }
 
     // Claim DMA channels 10/11 — leave low channels for PIO-USB
     dma_tx_chan = 10;
@@ -141,8 +148,8 @@ bool spi_master_finish_transfer(void) {
         return true;
     } else {
         rx_errors++;
-        // Debug: log first few CRC failures to see what we're receiving
-        if (rx_errors <= 5 || (rx_errors % 10000) == 0) {
+        // Debug: log first 5 CRC failures only
+        if (rx_errors <= 5) {
             uint8_t *p = (uint8_t *)&rx_frame_dma;
             uint8_t expected_crc = spi_crc8(p, SPI_FRAME_SIZE - 1);
             printf("[SPI-DBG] CRC fail #%lu: got=0x%02X exp=0x%02X | "

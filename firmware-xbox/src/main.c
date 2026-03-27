@@ -24,6 +24,7 @@
 #include <string.h>
 
 #define WATCHDOG_TIMEOUT_MS 2000  // 2s during bring-up (tighten after stable)
+#define AUTH_BOOT_TIMEOUT_MS 15000  // 15s for auth controller to reach GIP_HOST_READY
 
 // External: SPI master DMA driver (spi_master.c)
 extern void spi_master_init(void);
@@ -74,9 +75,12 @@ int main(void) {
     printf("Clock: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
     printf("Build: %s %s\n\n", __DATE__, __TIME__);
 
-    // Initialize TinyUSB device (Xbox connection)
+    // Initialize TinyUSB device stack but IMMEDIATELY pull D+ low.
+    // Xbox must NOT see us until auth controller is confirmed ready.
+    // Risk: unanswered GIP 0x06 auth → Xbox error 0x82d60003 (permanent ban).
     tud_init(0);
-    printf("[XBOX] TinyUSB device initialized\n");
+    tud_disconnect();  // D+ low — invisible to Xbox
+    printf("[XBOX] TinyUSB device initialized (D+ held LOW — Xbox gated)\n");
 
     // Initialize GIP protocol
     gip_init();
@@ -88,11 +92,75 @@ int main(void) {
     // Launch Core 1 (PIO-USB host + Equation VM)
     printf("[MAIN] Launching Core 1 (PIO-USB host + VM)...\n");
     multicore_launch_core1(core1_entry);
-    sleep_ms(500);  // Give Core 1 time to init PIO-USB
 
-    // Enable watchdog AFTER Core 1 is running
+    // ── AUTH SAFETY GATE ──
+    // Wait for PowerA auth controller to reach GIP_HOST_READY before
+    // allowing Xbox to see this device. No watchdog during gate —
+    // the timeout below is the safety net for Core 1 hangs.
+    {
+        printf("[SAFETY] Waiting for auth controller...\n");
+        uint32_t gate_start = to_ms_since_boot(get_absolute_time());
+        uint8_t last_state = 0xFF;
+
+        while (true) {
+            uint32_t elapsed = to_ms_since_boot(get_absolute_time()) - gate_start;
+
+            // Log state transitions for diagnostics
+            uint8_t state = auth_host_get_state();
+            if (state != last_state) {
+                static const char *state_names[] = {
+                    "IDLE", "OPENING_EP", "WAIT_ANNOUNCE",
+                    "WAIT_IDENTIFY", "POWERING_ON", "READY"
+                };
+                const char *name = (state <= 5) ? state_names[state] : "UNKNOWN";
+                printf("[SAFETY] Auth state: %s (%lums)\n", name, (unsigned long)elapsed);
+                last_state = state;
+            }
+
+            // Success: auth controller is GIP-ready
+            if (auth_host_connected()) {
+                printf("[SAFETY] Auth gate PASSED — controller ready (%lums)\n",
+                       (unsigned long)elapsed);
+                break;
+            }
+
+            // Timeout: refuse to connect to Xbox — device is safe-dead
+            if (elapsed >= AUTH_BOOT_TIMEOUT_MS) {
+                printf("\n[SAFETY] === AUTH CONTROLLER NOT READY AFTER %ds ===\n",
+                       AUTH_BOOT_TIMEOUT_MS / 1000);
+                printf("[SAFETY] Refusing Xbox connection to prevent error 0x82d60003.\n");
+                printf("[SAFETY] Check: Is the Xbox Wireless controller plugged into Board X?\n");
+                printf("[SAFETY] Device is safe-halted. Power cycle to retry.\n\n");
+                // Stay here forever — D+ stays low, Xbox never sees us.
+                // No watchdog enabled, so no automatic reset.
+                while (true) {
+                    sleep_ms(1000);
+                }
+            }
+
+            sleep_ms(50);
+        }
+    }
+
+    // Auth confirmed ready — NOW let Xbox see us
+    tud_connect();  // D+ high — Xbox begins enumeration
+    printf("[XBOX] D+ enabled — Xbox can now enumerate this device\n");
+
+    // Enable watchdog AFTER both cores are fully operational
     watchdog_enable(WATCHDOG_TIMEOUT_MS, true);
     printf("[MAIN] Watchdog enabled (%dms)\n", WATCHDOG_TIMEOUT_MS);
+
+    // Diagnostic: verify SPI GPIO functions weren't stolen by PIO-USB
+    // func: 1=SPI, 5=SIO/GPIO, 6=PIO0, 7=PIO1
+    {
+        #include "hardware/structs/iobank0.h"
+        for (int pin = 2; pin <= 5; pin++) {
+            uint32_t ctrl = iobank0_hw->io[pin].ctrl;
+            uint8_t func = ctrl & 0x1F;
+            const char *name = (func == 1) ? "SPI" : (func == 6) ? "PIO0!" : (func == 7) ? "PIO1!" : "???";
+            printf("[SPI-DIAG] GPIO%d func=%d (%s)\n", pin, func, name);
+        }
+    }
 
     printf("[MAIN] Entering main loop\n\n");
 
@@ -114,11 +182,49 @@ int main(void) {
     uint16_t auth_pending_len = 0;  // Non-zero if challenge waiting for PowerA
     uint32_t auth_retry_start = 0;  // When we first tried to forward
 
+    // Safety: track auth controller presence for mid-session disconnect.
+    // The PowerA controller transiently disconnects/reconnects after Xbox
+    // enters CONFIG state (normal USB reset behavior). Use a debounce:
+    // only trigger safety disconnect if auth stays gone for 3 seconds.
+    bool auth_was_connected = true;
+    uint32_t auth_lost_since = 0;  // 0 = not currently lost
+    #define AUTH_DISCONNECT_DEBOUNCE_MS 3000
+
     while (true) {
         uint32_t now_ms = to_ms_since_boot(get_absolute_time());
 
-        // ── TinyUSB device task (always, handles Xbox USB events) ──
+        // ── TinyUSB device task (always, even if auth lost — handles USB teardown) ──
         tud_task();
+
+        // ── SAFETY: Mid-session auth controller loss detection (#37) ──
+        // Debounced: PowerA transiently disconnects after auth rounds complete.
+        // Only trigger if it stays gone for 3 seconds.
+        if (auth_was_connected) {
+            if (!auth_host_connected()) {
+                if (auth_lost_since == 0) {
+                    auth_lost_since = now_ms;
+                    printf("[SAFETY] Auth controller disconnected — watching (3s debounce)\n");
+                } else if (now_ms - auth_lost_since >= AUTH_DISCONNECT_DEBOUNCE_MS) {
+                    printf("\n[SAFETY] Auth controller GONE for %ds — disconnecting from Xbox\n",
+                           AUTH_DISCONNECT_DEBOUNCE_MS / 1000);
+                    printf("[SAFETY] Clean disconnect prevents error 0x82d60003.\n\n");
+                    tud_disconnect();
+                    auth_was_connected = false;
+                }
+            } else {
+                if (auth_lost_since != 0) {
+                    printf("[SAFETY] Auth controller reconnected (%lums glitch)\n",
+                           (unsigned long)(now_ms - auth_lost_since));
+                    auth_lost_since = 0;
+                }
+            }
+        }
+
+        // Skip all GIP/SPI/input if auth is lost — nothing useful to do
+        if (!auth_was_connected) {
+            sleep_ms(10);
+            continue;
+        }
 
         // ── GIP protocol task (keepalive, command processing) ──
         gip_task();
@@ -141,7 +247,10 @@ int main(void) {
                     printf("[AUTH] Challenge forwarded to PowerA (%d bytes)\n", auth_pending_len);
                     auth_pending_len = 0;
                 } else if (now_ms - auth_retry_start >= 5000) {
-                    printf("[AUTH] ERROR: PowerA not ready after 5s, dropping challenge\n");
+                    // SAFETY (#38): disconnect rather than silently dropping
+                    printf("\n[SAFETY] Auth relay timeout (5s) — disconnecting to prevent ban\n");
+                    tud_disconnect();
+                    auth_was_connected = false;
                     auth_pending_len = 0;
                 }
                 // Otherwise: retry next loop iteration
@@ -220,16 +329,13 @@ int main(void) {
             last_spi_ms = now_ms;
         }
 
-        // ── Periodic status ──
-        if (now_ms - last_status_ms >= 5000) {
-            printf("[STATUS] Xbox:%s SPI(rx=%lu err=%lu pend=%d) Auth:%s(%s) "
-                   "Steer=%04X Gas=%02X Brake=%02X\n",
+        // ── Periodic status (every 30s — quiet mode) ──
+        if (now_ms - last_status_ms >= 30000) {
+            printf("[STATUS] Xbox:%s SPI(rx=%lu err=%lu) Auth:%s Steer=%04X Gas=%02X Brake=%02X\n",
                    tud_mounted() ? "OK" : "--",
                    (unsigned long)spi_master_get_rx_count(),
                    (unsigned long)spi_master_get_error_count(),
-                   spi_pending ? 1 : 0,
                    gip_is_authenticated() ? "OK" : "--",
-                   auth_host_connected() ? "conn" : "wait",
                    rx_frame.steering, rx_frame.gas, rx_frame.brake);
             last_status_ms = now_ms;
         }

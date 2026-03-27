@@ -11,7 +11,10 @@
 #include "bridge_config.h"
 
 #include "pio_usb.h"
+#include "pio_usb_ll.h"
+#include "usb_definitions.h"
 #include "tusb.h"
+#include "hardware/gpio.h"
 #include "hardware/sync.h"
 
 #include <stdio.h>
@@ -33,6 +36,9 @@ static uint8_t mode_switch_attempts = 0;
 #define MODE_SWITCH_MAX_ATTEMPTS 2
 
 // ─── Init ───
+
+// Track spurious unmount retries — no limit, keep trying forever
+static volatile uint8_t unmount_retry_count = 0;
 
 bool g29_host_init(void) {
     // Configure PIO-USB for TinyUSB host
@@ -178,8 +184,18 @@ void tuh_umount_cb(uint8_t dev_addr) {
             status = G29_STATUS_DISCONNECTED;
         }
         g29_dev_addr = 0;
-    } else {
-        // Not our G29 — ignore
+        unmount_retry_count = 0;  // Real device — reset retry counter
+    } else if (g29_dev_addr == 0) {
+        // Spurious unmount: PIO-USB detected the device and started
+        // enumeration, but it failed (common with already-connected devices).
+        // Force connected=false so PIO-USB re-detects the pull-up and retries.
+        unmount_retry_count++;
+        if (unmount_retry_count <= 5 || (unmount_retry_count % 10) == 0) {
+            printf("[G29] Spurious unmount — forcing re-detect (retry %d)\n",
+                   unmount_retry_count);
+        }
+        root_port_t *root = PIO_USB_ROOT_PORT(0);
+        root->connected = false;
     }
 }
 
