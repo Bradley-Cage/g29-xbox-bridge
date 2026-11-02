@@ -4,6 +4,8 @@ Use a **Logitech G29 PlayStation racing wheel** on an **Xbox Series X** — with
 
 Two RP2040-Zero microcontrollers form an SPI-linked bridge. One board hosts the G29 and a donor PowerA auth board via PIO-based USB. The other presents a legitimate Xbox controller to the console, running Microsoft's GIP protocol with a bytecode force feedback VM.
 
+Status: Works as a generic Xbox controller; wheel-specific authentication (hardware chip) is the current blocker. Project no longer in active development. 
+
 ## Features
 
 - [x] **1kHz input polling** — steering, gas/brake/clutch, 15+ buttons, D-pad, paddle shifters
